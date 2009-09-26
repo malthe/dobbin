@@ -1,6 +1,7 @@
 Changes
 =======
 
-In next release...
+0.1 (2009-09-26)
+----------------
 
 - Initial public release.
