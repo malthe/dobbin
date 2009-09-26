@@ -1,0 +1,65 @@
+Notes
+=====
+
+Most users of the database will want to get acquainted with the
+information in this section, especially before deployment.
+
+Configuration
+-------------
+
+The default storage option (the transaction log) keeps data in a
+single file. Multiple processes may connect to the same file and share
+the same database. No further configuration is required; the storage
+uses native file-locking to ensure exclusive write-access.
+
+.. warning:: To avoid memory thrashing, limit the physical memory allowance of your Python processes and make sure there is enough virtual memory available (at least the size of your database) [#]_.
+
+You may want to compile Python with the ``--without-pymalloc`` flag to
+use native memory allocation. This may improve performance in
+applications that connect to large databases due to better paging.
+
+.. [#] On UNIX the ``ulimit`` command can be used limit physical memory
+ usage; this prevents thrashing when working with large databases.
+
+Motivation
+----------
+
+There are other object databases available for Python, most
+importantly the ZODB from Zope Corporation (available under the
+BSD-like ZPL license).
+
+Notable differences:
+
+- Dobbin is pure Python
+- 20 times less code
+- Less overhead
+
+The assumptions that Dobbin makes lead to a simple design; the case of
+the ZODB is the exact opposite. Which is more reasonable comes down to
+these assumptions.
+
+Architecture
+------------
+
+Dobbin does not try to limit its memory usage, in any way. The
+assumption that lead to this decision is that it's faster to page in
+CPython-objects from swap than read pickles from the database file and
+restore the objects which adds an allocation overhead besides the
+expensive unpickle operation.
+
+Persistent objects are kept in a *shared* state when possible, meaning
+that data is shared between threads. The exception is when threads
+want to change the state as part of a transaction. Objects are then
+*checked out* (an explicit function call) which puts the object in a
+*local* state; objects in this state have a local deep-copy of the
+shared state, which they are free to change.
+
+Another objective was to get rid of the requirement of a master node
+in order for several processes to share a single database. Instead we
+use native file-system locking and pull-based transaction
+propagation. There is no inherent network-support; it may be possible
+to use a virtualized file system (this is on a strictly theoretical
+basis; it has not been attempted).
+
+The database relies on the ``transaction`` package to support
+two-phase commits.
