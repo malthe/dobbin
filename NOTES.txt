@@ -31,7 +31,7 @@ BSD-like ZPL license).
 Notable differences:
 
 - Dobbin is pure Python
-- 20 times less code
+- 1/20 the codebase
 - Less overhead
 
 The assumptions that Dobbin makes lead to a simple design; the case of
