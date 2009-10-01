@@ -76,8 +76,12 @@ from read-only to thread-local.
 
 .. warning:: Applications must check out objects before changing their state.
 
-The object identity is never changed, but the object state is masked
-by a thread-local dictionary.
+The ``checkout`` does not have a return value; this is because the
+object identity never actually changes. Instead the attribute accessor
+and mutator methods are used to provide a thread-local object
+state. This happens transparent to the user.
+
+After checking out the object, we can both read and write attributes.
 
 >>> obj.name = 'John'
 >>> obj.name
@@ -96,6 +100,8 @@ We can elect this object as the root of the database.
 >>> db.set_root(obj)
 >>> obj._p_oid
 0
+>>> obj._p_jar is db
+True
 
 The object is now the root of the object graph. To persist changes on
 disk, we commit the transaction.
@@ -148,6 +154,8 @@ between different database instances are disjoint.
 >>> new_obj = new_db.get_root()
 >>> new_obj is obj
 False
+>>> new_obj._p_jar is new_db
+True
 
 Transactions propagate between instances of the same database.
 
@@ -177,8 +185,8 @@ sync.
 >>> new_obj.name
 'Jane'
 
-Conflicts
----------
+Internal conflicts
+------------------
 
 When two threads try to make changes to the same objects, we have a
 write conflict. One thread is guaranteed to win; with conflict
@@ -256,6 +264,9 @@ Traceback (most recent call last):
  ...
 RuntimeError: Can't set attribute in read-only mode.
 
+External conflicts
+------------------
+
 Two threads each belonging to different processes can conflict too,
 obviously. We can simulate two processes by again opening a new
 thread, but this time use the second database instance.
@@ -294,7 +305,7 @@ Releasing the semaphore, the thread will attempt to commit the
 transaction.
 
 >>> flag.release()
-  >>> thread.join()
+>>> thread.join()
 
 The transaction was committed.
 
@@ -328,13 +339,24 @@ We clean up from the failed transaction.
 More objects
 ------------
 
-When objects are added to the object graph, they are automatically
-persisted.
+Persistent objects must be connected to the object graph, before
+they're persisted in the database. If we check out a persistent object
+and commit the transaction without adding it to the object graph, an
+exception is raised.
 
 >>> another = Persistent()
 >>> checkout(another)
->>> another.name = 'Karla'
+>>> transaction.commit()
+Traceback (most recent call last):
+ ...
+ObjectGraphError: <dobbin.persistent.Persistent object at ...> not connected to graph.
 
+We abort the transaction and try again, this time connecting the
+object using an attribute reference.
+
+>>> transaction.abort()
+>>> checkout(another)
+>>> another.name = 'Karla'
 >>> checkout(obj)
 >>> obj.another = another
 
@@ -348,6 +370,13 @@ in general predictable; they are assigned by the storage).
 
 >>> another._p_oid is not None
 True
+
+If we begin a new transaction, the new object will propagate to the
+second database instance.
+
+>>> tx = transaction.begin()
+>>> new_obj.another.name
+'Karla'
 
 As we check out the object that carries the reference and access any
 attribute, a deep-copy of the shared state is made behind the
@@ -423,8 +452,8 @@ required when using the stream as a file.
 
 The ``seek`` and ``tell`` methods work as expected.
 
->>> obj.file.tell()
-3L
+>>> int(obj.file.tell())
+3
 
 We can seek to the beginning and repeat the exercise.
 
@@ -449,6 +478,55 @@ observe that the file remains closed.
 
 >>> obj.file.closed
 True
+
+Start a new transaction (to prompt database catch-up) and confirm that
+file is available from second database.
+
+>>> tx = transaction.begin()
+>>> "".join(new_obj.file)
+'abc'
+
+Persistent dictionary
+---------------------
+
+It's not advisable in general to use the built-in ``dict`` type to
+store records in the database, in particular not if you expect
+frequent minor changes. Instead the ``PersistentDict`` class should be
+used (directly, or subclassed).
+
+It operates as a normal Python dictionary and provides the same
+methods.
+
+  >>> from dobbin.persistent import PersistentDict
+  >>> pdict = PersistentDict()
+
+Check out objects and connect to object graph.
+
+  >>> checkout(obj)
+  >>> checkout(pdict)
+  >>> obj.pdict = pdict
+
+You can store any key/value combination that works with standard
+dictionaries.
+
+  >>> pdict['obj'] = obj
+  >>> pdict['obj'] is obj
+  True
+
+The ``PersistentDict`` stores attributes, too. Note that attributes
+and dictionary entries are independent from each other.
+
+  >>> pdict.name = 'Bob'
+  >>> pdict.name
+  'Bob'
+
+Committing the changes.
+
+  >>> transaction.commit()
+  >>> pdict['obj'] is obj
+  True
+  >>> pdict.name
+  'Bob'
 
 Cleanup
 -------

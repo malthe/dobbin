@@ -7,10 +7,9 @@ from dobbin.exc import WriteConflictError
 from dobbin.exc import ReadConflictError
 from dobbin.exc import ConflictError
 from dobbin.persistent import retract
+from dobbin.persistent import Broken
 from dobbin.persistent import Local
 from dobbin.persistent import Persistent
-from dobbin.utils import lazy
-from dobbin.utils import assert_persistent
 from dobbin.utils import make_timestamp
 
 ROOT_OID = 0
@@ -29,10 +28,11 @@ class Database(object):
     Database instances are thread-safe.
     """
 
-    def __init__(self, storage, transaction_manager=None):
+    _tx_manager = transaction.manager
+
+    def __init__(self, storage):
         self._storage = storage
         self._thread = ThreadState()
-        self._tx_manager = transaction_manager or transaction.manager
         self._tx_manager.registerSynch(self)
 
         # persistent-id to object mapping
@@ -62,10 +62,16 @@ class Database(object):
         root object graph.
         """
 
-        assert_persistent(obj)
+        if not isinstance(obj, Persistent):
+            raise TypeError(
+                "Can't add non-persistent object.")
+
+        if not isinstance(obj, Local):
+            raise TypeError(
+                "Check out object before adding it to the database.")
 
         if obj._p_jar is None:
-            obj.__dict__['_p_jar'] = self
+            obj._p_jar = self
             self._register(obj)
         elif obj._p_jar is self:
             raise RuntimeError(
@@ -93,14 +99,14 @@ class Database(object):
 
         while registered:
             for obj in tuple(registered):
+                # assert that object belongs to this database
+                if obj._p_jar is not self:
+                    raise InvalidObjectReference(obj)
+
                 # if the object has been updated since we begun our
                 # transaction, it's a write-conflict.
                 if obj._p_serial > timestamp:
                     raise WriteConflictError(obj)
-
-                # assert that object belongs to this database
-                if obj._p_jar is not self:
-                    raise InvalidObjectReference(obj)
 
                 # ask storage to commit object state
                 self._storage.commit(obj, transaction)
@@ -111,7 +117,12 @@ class Database(object):
                 registered.remove(obj)
 
     def get(self, oid):
-        return self._oid2obj.get(oid)
+        try:
+            obj = self._oid2obj[oid]
+        except KeyError:
+            obj = Broken(oid)
+            self._oid2obj[oid] = obj
+        return obj
 
     def get_root(self):
         return self._oid2obj.get(ROOT_OID)
@@ -120,7 +131,9 @@ class Database(object):
         self._register(obj)
 
     def set_root(self, obj):
-        assert_persistent(obj)
+        if not isinstance(obj, Persistent):
+            raise TypeError(
+                "Can't set non-persistent object as database root.")
 
         if obj._p_oid is not None:
             raise ValueError("Can't elect already persisted root object.")
@@ -130,12 +143,13 @@ class Database(object):
 
         self.add(obj)
         obj._p_oid = ROOT_OID
+        obj._p_jar = self
 
     def beforeCompletion(self, transaction):
-        """Not used."""
+        pass
 
     def afterCompletion(self, transaction):
-        """Not used."""
+        pass
 
     def newTransaction(self, transaction):
         """New transaction.
@@ -188,10 +202,9 @@ class Database(object):
         for obj in self._thread.committed:
             oid2obj[obj._p_oid] = obj
 
-            # apply state
             state = obj.__getstate__()
-            state['_p_serial'] = timestamp
-            obj.__dict__.update(state)
+            obj.__setstate__(state)
+            obj._p_serial = timestamp
 
             # unregister object with this transaction
             self._unregister(obj)
@@ -242,7 +255,6 @@ class Database(object):
                 # it using the ``__new__`` constructor
                 if obj is None:
                     obj = object.__new__(cls)
-                    state['_p_jar'] = self
                     state['_p_oid'] = oid
                     oid2obj[oid] = obj
                 elif isinstance(obj, Local):
@@ -258,12 +270,17 @@ class Database(object):
                             obj.__getstate__(), obj.__dict__, state)
                     except ConflictError:
                         conflicts.add(obj)
+                else:
+                    object.__setattr__(obj, "__class__", cls)
 
                 # update timestamp
                 state['_p_serial'] = timestamp
 
+                # associate with this database
+                state['_p_jar'] = self
+
                 # set shared state
-                Persistent.__setstate__(obj, state)
+                obj.__setstate__(state)
 
             if conflicts:
                 raise ReadConflictError(*conflicts)
@@ -287,7 +304,7 @@ class Database(object):
         obj._p_count -= 1
         if self._maybe_share_object(obj):
             return True
-        obj.__setstate__()
+        obj.__dict__.clear()
 
     def _update_timestamp(self):
         timestamp = self._thread.timestamp = make_timestamp()
@@ -299,7 +316,8 @@ class Database(object):
 class ThreadState(threading.local):
     """Thread-local database state."""
 
-    registered = lazy(set)
-    committed = lazy(set)
-    needs_to_join = True
-    timestamp = None
+    def __init__(self):
+        self.registered = set()
+        self.committed = set()
+        self.needs_to_join = True
+        self.timestamp = None

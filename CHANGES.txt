@@ -1,6 +1,17 @@
 Changes
 =======
 
+In next release...
+
+- Added ``PersistentDict`` class. Due to changes in the ``Persistent``
+  superclass, this dictionary is little more than sugar coating and
+  the implementation of the standard dictionary interface.
+
+- The ``Persistent`` class is now persisted as changesets rather than
+  complete object state.
+
+- Set up tests to run using the nose testrunner (or using setuptools).
+
 0.1 (2009-09-26)
 ----------------
 

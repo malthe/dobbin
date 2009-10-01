@@ -15,7 +15,6 @@ CHANGES = open(os.path.join(here, 'CHANGES.txt')).read()
 USAGE = open(os.path.join(here, 'src', 'dobbin', 'README.txt')).read()
 
 version = sys.version_info[:3]
-test_suite = "dobbin.tests.test_suite"
 
 setup(
     name="dobbin",
@@ -40,6 +39,6 @@ setup(
     package_dir = {'': 'src'},
     include_package_data=True,
     zip_safe=False,
-    test_suite=test_suite,
+    test_suite="dobbin.tests",
     )
 

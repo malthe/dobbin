@@ -1,9 +1,11 @@
+import logging
+import mmap
 import os
 import re
-import mmap
 import shutil
 import threading
-import cPickle as pickle
+# import cPickle as pickle
+import pickle
 from cStringIO import StringIO
 
 from fcntl import flock
@@ -24,6 +26,7 @@ LOG_RECORD = 1
 LOG_STREAM = 2
 
 re_id = re.compile(r'(?P<protocol>[a-z]+)://(?P<token>[0-9:]+)')
+logger = logging.getLogger('dobbin.storage')
 
 class TransactionRecord(object):
     def __init__(self, tid, status):
@@ -99,14 +102,18 @@ class TransactionLog(object):
             return
 
         self._rstream.seek(0)
-        map = mmap.mmap(self._rstream.fileno(), 0, mmap.PROT_READ)
-        try:
-            map.seek(self._offset)
-            size = map.size()
-        except ValueError:
-            size = 0
 
-        unpickler = pickle.Unpickler(map)
+        # different version of Python raise exceptions in either the
+        # constructor, or on the first operation; wrap all statements
+        # in a try-except handler
+        try:
+            _map = mmap.mmap(self._rstream.fileno(), 0, mmap.PROT_READ)
+            _map.seek(self._offset)
+            size = _map.size()
+        except (ValueError, mmap.error):
+            return
+
+        unpickler = pickle.Unpickler(_map)
 
         def load(oid):
             match = re_id.match(oid)
@@ -118,7 +125,7 @@ class TransactionLog(object):
 
             if protocol == 'oid':
                 oid = int(token)
-                return jar.get(token)
+                return jar.get(oid)
 
             if protocol == 'file':
                 offset, length = map(int, token.split(':'))
@@ -145,11 +152,11 @@ class TransactionLog(object):
 
                 elif segment_type == LOG_STREAM:
                     name, length = segment
-                    map.seek(length, os.SEEK_CUR)
+                    _map.seek(length, os.SEEK_CUR)
 
-                self._offset = map.tell()
+                self._offset = _map.tell()
         finally:
-            map.close()
+            _map.close()
 
         if versions:
             raise IntegrityError(
@@ -178,6 +185,8 @@ class TransactionLog(object):
         if oid is None:
             oid = self._new_oid(obj)
 
+        deferred = []
+
         def persistent_id(obj):
             """This closure provides persistent identifier tokens for
             persistent objects and files.
@@ -204,13 +213,8 @@ class TransactionLog(object):
                 obj.seek(offset)
 
                 # write transaction log segment
-                self._write(LOG_STREAM, (obj.name, length))
-
-                # flush output stream to retrieve location
-                offset = self._flush()
-
-                # write file content
-                self._write_raw(obj, length)
+                offset = self._write_unbuffered(LOG_STREAM, (obj.name, length))
+                self._write_stream(obj, length)
 
                 # switch identity to transaction stream
                 obj.__dict__.clear()
@@ -224,6 +228,15 @@ class TransactionLog(object):
                     "Can't persist files; use the ``PersistentFile`` wrapper.")
 
         self._pickler.persistent_id = persistent_id
+
+        # pickle object state; note that the pickler instance is set
+        # up to write to a buffer in memory --- the reason being that
+        # pickling may fail, which is likely to result in integrity
+        # errors if we write directly to disk (another critical
+        # benefit is that the ``persistent_id`` method is free to
+        # write data to disk, circumventing the pickle buffer; this is
+        # used to write file streams in parallel with the pickle
+        # operation); all in all: brittle machinery.
         self._write(LOG_VERSION, (oid, cls, state))
 
     def tpc_abort(self, transaction, timestamp):
@@ -318,15 +331,16 @@ class TransactionLog(object):
         finally:
             self._lock_release()
 
-    def _flush(self):
+    def _flush(self, offset=0):
         stream = self._buffer
 
         # persist changes on disk
-        stream.seek(0)
-        self._wstream.write(stream.getvalue())
+        stream.seek(offset)
+        bytes = stream.read()
+        self._wstream.write(bytes)
 
         # truncate stream
-        stream.seek(0)
+        stream.seek(offset)
         stream.truncate()
 
         return self._wstream.tell()
@@ -345,14 +359,20 @@ class TransactionLog(object):
         return oid
 
     def _write(self, segment_type, data):
-        # dump to pickle buffer
-        self._pickler.dump((segment_type, data))
-
-        # flush when buffer exceeds flush size
-        if self._buffer.tell() > self._soft_buffer_size:
+        try:
+            self._pickler.dump((segment_type, data))
+        except:
+            logger.critical("Could not pickle data: %s (type %d)." % (
+                repr(data), segment_type))
             self._flush()
+            raise
 
-    def _write_raw(self, stream, length):
+    def _write_unbuffered(self, segment_type, data):
+        offset = self._buffer.tell()
+        self._write(segment_type, data)
+        return self._flush(offset)
+
+    def _write_stream(self, stream, length):
         shutil.copyfileobj(stream, self._wstream, length)
 
 class PersistentStream(threading.local):
@@ -369,6 +389,9 @@ class PersistentStream(threading.local):
         self._opener = opener
         self.offset = offset
         self.length = length
+
+    def __deepcopy__(self, memo):
+        return self
 
     def __iter__(self):
         """Iterate through stream.
@@ -424,6 +447,8 @@ class PersistentStream(threading.local):
     def read(self, size=None, stream=None):
         if stream is None:
             stream = self.stream
+            if stream is None:
+                raise ValueError("File not open for reading.")
         if size is None:
             size = self.length
         return stream.read(min(size, self.length))

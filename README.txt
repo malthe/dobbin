@@ -26,6 +26,7 @@ Source
 The source code is kept in version control. Use this command to
 anonymously check out the latest project source code::
 
-svn co http://svn.repoze.org/dobbin/trunk dobbin
+  svn co http://svn.repoze.org/dobbin/trunk dobbin
+
 
 

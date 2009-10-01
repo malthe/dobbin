@@ -29,6 +29,9 @@ class IntegrityError(Exception):
         return '<%s %s>' % (
             type(self).__name__, repr(self.reason))
 
+class ObjectGraphError(Exception):
+    """Object graph integrity error."""
+
 class InvalidObjectReference(Exception):
     """Object reference invalid for this database."""
 

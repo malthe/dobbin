@@ -1,8 +1,16 @@
 import copy
 import os
 import threading
+import transaction
 
-marker = object()
+from dobbin.exc import ObjectGraphError
+from dobbin.utils import localset
+
+MARKER = object()
+DELETE = object()
+IGNORE = object()
+
+setattr = object.__setattr__
 
 def checkout(obj):
     """Puts the object in local state, such that the object can be
@@ -11,21 +19,17 @@ def checkout(obj):
     if not isinstance(obj, Persistent):
         raise TypeError("Object is not persistent.")
 
-    # return objects in local state immediately
-    if isinstance(obj, Local):
-        obj._p_jar.save(obj)
-        return
+    # upgrade shared objects to local; note that it's not an error to
+    # check out an already local object
+    if not isinstance(obj, Local):
+        d = obj.__dict__
+        cls = make_persistent_local(obj.__class__)
+        setattr(obj, '__class__', cls)
+        obj.__init__(d)
 
-    # upgrade class with persistent local bindings
-    obj.__class__ = make_persistent_local(obj.__class__)
-
-    __dict__ = obj.__dict__
-    _p_local = __dict__.get("_p_local", marker)
-    if _p_local is marker:
-        __dict__['_p_local'] = threading.local()
-
-    # we assume that this object will be modified
-    if obj._p_jar is not None:
+    if obj._p_jar is None:
+        sync(obj)
+    else:
         if obj._p_oid is None:
             obj._p_jar.add(obj)
         else:
@@ -59,75 +63,215 @@ def update_local(inst, _p_local_dict):
     _p_local_dict.update(copy.deepcopy(__dict__))
 
 class Persistent(object):
-    """Persistent base class."""
+    """Persistent base class.
+
+    The methods provided by this class are mostly there to protect
+    users from using the database in a way that could cause integrity
+    errors.
+
+    It's also a marker for the database to know that this object
+    should have its own identity in the database.
+    """
 
     _p_jar = None
     _p_oid = None
     _p_serial = None
     _p_resolve_conflict = None
 
-    def __setattr__(self, key, value):
-        if key.startswith("__"):
-            return object.__setattr__(self, key, value)
-        if key.startswith("_p_"):
-            raise ValueError("Can't set system attribute: %s." % key)
-        raise RuntimeError("Can't set attribute in read-only mode.")
-
-    def __setstate__(self, state):
-        self.__dict__.update(state)
+    @property
+    def _p_shared(self):
+        return self.__dict__
 
     def __deepcopy__(self, memo):
-        """Persistent objects are never deep-copied."""
-
+        # persistent objects are never deep-copied
         return self
 
+    def __getstate__(self):
+        raise RuntimeError(
+            "Shared persistent objects are not serializable.")
+
+    def __setattr__(self, key, value):
+        raise RuntimeError("Can't set attribute in read-only mode.")
+
+    def __setitem__(self, key, value):
+        raise RuntimeError("Can't set item in read-only mode.")
+
+    def __setstate__(self, new_state):
+        state = self._p_shared
+        for key, value in new_state.items():
+            if value is DELETE:
+                del state[key]
+            if value is IGNORE:
+                continue
+            else:
+                state[key] = value
+
+class Broken(Persistent):
+    def __init__(self, oid):
+        self.__dict__['_p_oid'] = oid
+
 class Local(Persistent):
-    """Objects that derive from this class have thread-local state,
-    which is prepared on-demand on a per-thread basis."""
+    """Local persistent.
+
+    This class is used internally be the database.
+
+    Objects that derive from this class have thread-local state, which
+    is prepared on-demand on a per-thread basis.
+
+    Note that the ``__dict__`` attribute returns the thread-local
+    dictionary. Applications get access the shared state from the
+    ``_p_shared`` attribute; in general, they should not.
+    """
 
     _p_count = 0
     _p_local = None
+    _p_shared = None
+
+    def __init__(self, shared):
+        shared['_p_local'] = _local(shared)
+        shared['_p_shared'] = shared
+
+    @property
+    def __dict__(self):
+        return self._p_local.__dict__
 
     def __getstate__(self):
-        state = {}
-        for key, value in self._p_local.__dict__.items():
-            if key.startswith('_p_'):
-                continue
-            state[key] = value
-        state['_p_oid'] = self._p_oid
-        return state
-
-    def __setstate__(self, new_state=None):
-        state = self._p_local.__dict__
-        state.clear()
-        if new_state is not None:
-            state.update(new_state)
+        return self._p_local.__dict__
 
     def __setattr__(self, key, value):
-        if key.startswith('_p_') or key.startswith('__'):
-            object.__setattr__(self, key, value)
+        if isinstance(key, basestring):
+            if key.startswith('_p_') or key.startswith('__'):
+                self._p_shared[key] = value
+                return
 
-        _p_local_dict = self._p_local.__dict__
-        if not _p_local_dict:
-            update_local(self, _p_local_dict)
+        self._p_local[key] = value
 
-        _p_local_dict[key] = value
+    def __getattr__(self, key):
+        if isinstance(key, basestring):
+            if key.startswith('_p_') or key.startswith('__'):
+                return object.__getattribute__(self, key)
 
-    def __getattribute__(self, key):
-        if key.startswith('_p_') or key.startswith('__'):
-            return object.__getattribute__(self, key)
-
-        _p_local_dict = self._p_local.__dict__
-        if not _p_local_dict:
-            update_local(self, _p_local_dict)
+        local = self._p_local
+        try:
+            value = local[key]
+            if value is DELETE:
+                raise AttributeError(key)
+            if value is not IGNORE:
+                return value
+        except KeyError:
+            pass
 
         try:
-            return _p_local_dict[key]
+            return self._p_shared[key]
         except KeyError:
-            # raise regular attribute-error; the thread-local
-            # dictionary is an implementation detail that does not
-            # benefit debugging
             raise AttributeError(key)
+
+class _local(threading.local):
+    """Thread local which proxies a shared dictionary."""
+
+    __slots__ = "_p_dict"
+
+    def __init__(self, d):
+        self._p_dict = d
+
+    def __delitem__(self, key):
+        self[key] = DELETE
+
+    def __getitem__(self, key):
+        return self.__dict__[key]
+
+    def __setitem__(self, key, value):
+        self.__dict__[key] = value
+
+class PersistentDict(Persistent):
+    """Persistent dictionary.
+
+    We make sure mutable objects (both keys and values) are
+    deep-copied when accessed from the proxied dictionary. This
+    guarantees that items in the thread-local dictionary are
+    always deep-copied for use by that thread.
+
+    Caution: This means that iterating through a checked out
+    ``PersistentDict`` can be expensive, if keys and/or values are
+    non-persistent, mutable objects.
+    """
+
+    def __init__(self, state=None):
+        if state is not None:
+            self.__dict__.update(state)
+
+    def __iter__(self):
+        shared = self._p_shared
+        local = shared.get("_p_local")
+
+        # if there's no thread-local dictionary, just iterate through
+        # the shared dictionary
+        if local is None:
+            for key in shared:
+                if isinstance(key, tuple):
+                    yield key[0]
+            return
+
+        # first iterate over local entries; we record each entry so
+        # avoid duplicates when later iterating over shared entries
+        keys = []
+        d = local.__dict__
+        for key in d:
+            if isinstance(key, tuple):
+                key = key[0]
+                if key is DELETE:
+                    continue
+
+                keys.append(key)
+                yield key
+
+        for key in shared:
+            if isinstance(key, tuple):
+                key = key[0]
+                if key not in keys:
+                    # deep-copy the key; if it's not the same object, we
+                    # set it on the local copy, with a marker value
+                    new_key = copy.deepcopy(key)
+                    if new_key is not key:
+                        self[new_key] = IGNORE
+                    yield new_key
+
+    def __getattr__(self, key):
+        try:
+            return self._p_shared[key]
+        except KeyError:
+            raise AttributeError(key)
+
+    def __setitem__(self, key, value):
+        self.__setattr__((key,), value)
+
+    def __getitem__(self, key):
+        return self.__getattr__((key,))
+
+    def get(self, key, default=None):
+        shared = self._p_shared
+        local = shared.get("_p_local")
+        key = (key,)
+
+        if local is not None:
+            value = local.__dict__.get(key, MARKER)
+            if value is not MARKER:
+                return value
+
+        return shared.get(key, default)
+
+    def items(self):
+        return [(key, self[key]) for key in self]
+
+    def keys(self):
+        return [key for key in self]
+
+    def setdefault(self, key, default):
+        value = self.get(key, MARKER)
+        if value is not MARKER:
+            return value
+        self[key] = default
+        return default
 
 class PersistentFile(threading.local):
     """Persistent file.
@@ -156,3 +300,52 @@ class PersistentFile(threading.local):
 
     def read(self, size=-1):
         return self.stream.read(size)
+
+class UnconnectedSync(object):
+    _tx_manager = transaction.manager
+    _unconnected = localset()
+
+    def __init__(self):
+        self._tx_manager.registerSynch(self)
+
+    def __call__(self, obj):
+        self._unconnected.add(obj)
+
+    def abort(self, transaction):
+        pass
+
+    def afterCompletion(self, transaction):
+        pass
+
+    def beforeCompletion(self, transaction):
+        if self._unconnected:
+            self._tx_manager.get().join(self)
+
+    def newTransaction(self, transaction):
+        pass
+
+    def commit(self, transaction):
+        pass
+
+    def sortKey(self):
+        return -1
+
+    def tpc_begin(self, transaction):
+        pass
+
+    def tpc_abort(self, transaction):
+        self._unconnected.clear()
+
+    def tpc_vote(self, transaction):
+        unconnected = self._unconnected
+        while unconnected:
+            obj = unconnected.pop()
+            if obj._p_jar is None:
+                unconnected.clear()
+                raise ObjectGraphError(
+                    "%s not connected to graph." % repr(obj))
+
+    def tpc_finish(self, transaction):
+        self._unconnected.clear()
+
+sync = UnconnectedSync()
