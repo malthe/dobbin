@@ -18,14 +18,12 @@ log = logging.getLogger("dobbin.database")
 
 marker = object()
 
-class Database(object):
-    """Object database class.
+class Manager(object):
+    """Transactional object manager.
 
-    Initialized with a storage option, e.g. ``TransactionLog``. Common
-    usage of the database is via the ``get_root`` and ``set_root``
-    methods.
-
-    Database instances are thread-safe.
+    This class provides low-level functionality to support an object
+    database which implements two-phase commit using the
+    ``transaction`` package.
     """
 
     _tx_manager = transaction.manager
@@ -46,6 +44,12 @@ class Database(object):
         # load objects from storage
         self._read()
 
+    def __deepcopy__(self, memo):
+        return self
+
+    def __getitem__(self, oid):
+        return self._oid2obj[oid]
+
     def __len__(self):
         return len(self._oid2obj)
 
@@ -54,6 +58,12 @@ class Database(object):
             type(self).__name__,
             len(self),
             type(self._storage).__name__)
+
+    def abort(self, transaction):
+        """Abort changes."""
+
+        self.revert(self._thread.registered)
+        self.revert(self._thread.committed)
 
     def add(self, obj):
         """Add an object to the database.
@@ -72,23 +82,18 @@ class Database(object):
 
         if obj._p_jar is None:
             obj._p_jar = self
-            self._register(obj)
+            self.register(obj)
         elif obj._p_jar is self:
             raise RuntimeError(
                 "Object already added to the database.")
         else:
             raise InvalidObjectReference(obj)
 
-    def abort(self, transaction):
-        """Abort changes."""
+    def afterCompletion(self, transaction):
+        pass
 
-        self.revert(self._thread.registered)
-        self.revert(self._thread.committed)
-
-    def revert(self, objects):
-        while objects:
-            obj = objects.pop()
-            self._unregister(obj)
+    def beforeCompletion(self, transaction):
+        pass
 
     def commit(self, transaction):
         """Commit changes to disk."""
@@ -124,33 +129,6 @@ class Database(object):
             self._oid2obj[oid] = obj
         return obj
 
-    def get_root(self):
-        return self._oid2obj.get(ROOT_OID)
-
-    def save(self, obj):
-        self._register(obj)
-
-    def set_root(self, obj):
-        if not isinstance(obj, Persistent):
-            raise TypeError(
-                "Can't set non-persistent object as database root.")
-
-        if obj._p_oid is not None:
-            raise ValueError("Can't elect already persisted root object.")
-
-        if self.get_root() is not None:
-            raise RuntimeError("Database root already set.")
-
-        self.add(obj)
-        obj._p_oid = ROOT_OID
-        obj._p_jar = self
-
-    def beforeCompletion(self, transaction):
-        pass
-
-    def afterCompletion(self, transaction):
-        pass
-
     def newTransaction(self, transaction):
         """New transaction.
 
@@ -158,6 +136,37 @@ class Database(object):
         """
 
         self._read()
+
+    def register(self, obj):
+        if self._thread.needs_to_join:
+            self._tx_manager.get().join(self)
+            self._thread.needs_to_join = False
+            self._thread.timestamp = make_timestamp()
+
+        # if the object has not already been registered with this
+        # thread we do so and update the thread-use count
+        registered = self._thread.registered
+        if obj not in registered:
+            registered.add(obj)
+            obj._p_count += 1
+
+    def revert(self, objects):
+        while objects:
+            obj = objects.pop()
+            self._unregister(obj)
+
+    def save(self, obj):
+        self.register(obj)
+
+    def sortKey(self):
+        """Sort-key.
+
+        This method is required by the transaction machinery; the key
+        returned guarantees that the first thread to check out an
+        object wins the transaction.
+        """
+
+        return id(self), self._thread.timestamp
 
     def tpc_abort(self, transaction):
         """Abort transaction.
@@ -211,24 +220,6 @@ class Database(object):
 
         self._storage.tpc_finish(transaction, timestamp)
         self._tpc_cleanup()
-
-    def sortKey(self):
-        """Sort-key.
-
-        This method is required by the transaction machinery; the key
-        returned guarantees that the first thread to check out an
-        object wins the transaction.
-        """
-
-        return id(self), self._thread.timestamp
-
-    def _tpc_cleanup(self):
-        """Performs cleanup operations to support ``tpc_finish`` and
-        ``tpc_abort``."""
-
-        self._thread.registered.clear()
-        self._thread.committed.clear()
-        self._thread.needs_to_join = True
 
     def _maybe_share_object(self, obj):
         self._lock_acquire()
@@ -287,18 +278,13 @@ class Database(object):
         finally:
             self._lock_release()
 
-    def _register(self, obj):
-        if self._thread.needs_to_join:
-            self._tx_manager.get().join(self)
-            self._thread.needs_to_join = False
-            self._thread.timestamp = make_timestamp()
+    def _tpc_cleanup(self):
+        """Performs cleanup operations to support ``tpc_finish`` and
+        ``tpc_abort``."""
 
-        # if the object has not already been registered with this
-        # thread we do so and update the thread-use count
-        registered = self._thread.registered
-        if obj not in registered:
-            registered.add(obj)
-            obj._p_count += 1
+        self._thread.registered.clear()
+        self._thread.committed.clear()
+        self._thread.needs_to_join = True
 
     def _unregister(self, obj):
         obj._p_count -= 1
@@ -310,8 +296,36 @@ class Database(object):
         timestamp = self._thread.timestamp = make_timestamp()
         return timestamp
 
-    def __deepcopy__(self, memo):
-        return self
+class Database(Manager):
+    """Transactional object database.
+
+    Database instances are thread-safe; for optimal performance and
+    memory usage, threads should share the same object graph (if they
+    need access to the same database).
+
+    :param storage: storage instance
+    """
+
+    def get_root(self):
+        try:
+            return self[ROOT_OID]
+        except KeyError:
+            return
+
+    def set_root(self, obj):
+        if not isinstance(obj, Persistent):
+            raise TypeError(
+                "Can't set non-persistent object as database root.")
+
+        if obj._p_oid is not None:
+            raise ValueError("Can't elect already persisted root object.")
+
+        if self.get_root() is not None:
+            raise RuntimeError("Database root already set.")
+
+        self.add(obj)
+        obj._p_oid = ROOT_OID
+        obj._p_jar = self
 
 class ThreadState(threading.local):
     """Thread-local database state."""
