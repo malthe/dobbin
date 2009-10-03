@@ -94,73 +94,30 @@ class TransactionLog(object):
         """Read transactions.
 
         This method yields tuples of (oid, class, state, timestamp).
-
-        Caution: Not thread-safe.
         """
 
-        if self._rstream is None and not self._open():
-            return
-
-        self._rstream.seek(0)
-
-        # different version of Python raise exceptions in either the
-        # constructor, or on the first operation; wrap all statements
-        # in a try-except handler
+        self._lock_acquire()
         try:
-            _map = mmap.mmap(self._rstream.fileno(), 0, mmap.PROT_READ)
-            _map.seek(self._offset)
-            size = _map.size()
-        except (ValueError, mmap.error):
-            return
+            if self._rstream is None and not self._open():
+                return
 
-        unpickler = pickle.Unpickler(_map)
+            try:
+                _map = mmap.mmap(self._rstream.fileno(), 0, mmap.PROT_READ)
+                _map.seek(self._offset)
+            except (ValueError, mmap.error):
+                return
 
-        def load(oid):
-            match = re_id.match(oid)
-            if match is None:
-                raise ValueError('Protocol mismatch: %s.' % oid)
-
-            protocol = match.group('protocol')
-            token = match.group('token')
-
-            if protocol == 'oid':
-                oid = int(token)
-                return jar.get(oid)
-
-            if protocol == 'file':
-                offset, length = map(int, token.split(':'))
-                return PersistentStream(self._opener, offset, length)
-
-            raise ValueError('Unknown protocol: %s.' % protocol)
-
-        unpickler.persistent_load = load
-
-        versions = []
-        try:
-            while size > self._offset:
-                segment_type, segment = unpickler.load()
-
-                if segment_type == LOG_VERSION:
-                    versions.append(segment)
-
-                elif segment_type == LOG_RECORD:
-                    while versions:
-                        oid, cls, state = versions.pop()
-                        self._oid = oid
-                        yield oid, cls, state, segment.tid
-                    self._tx_count +=1
-
-                elif segment_type == LOG_STREAM:
-                    name, length = segment
-                    _map.seek(length, os.SEEK_CUR)
-
+            last_record = None
+            try:
+                for record, items in self._read(jar, _map):
+                    self._tx_count += 1
+                    for oid, cls, state in items:
+                        yield oid, cls, state, record.tid
+            finally:
                 self._offset = _map.tell()
+                _map.close()
         finally:
-            _map.close()
-
-        if versions:
-            raise IntegrityError(
-                "Transaction record not found for %d objects." % len(versions))
+            self._lock_release()
 
     def commit(self, obj, transaction):
         """Serialize object and write to database.
@@ -357,6 +314,52 @@ class TransactionLog(object):
         oid = obj._p_oid = self._oid + 1
         self._oid = oid
         return oid
+
+    def _read(self, jar, stream):
+        offset = stream.tell()
+        size = stream.size()
+        unpickler = pickle.Unpickler(stream)
+
+        def load(oid):
+            match = re_id.match(oid)
+            if match is None:
+                raise ValueError('Protocol mismatch: %s.' % oid)
+
+            protocol = match.group('protocol')
+            token = match.group('token')
+
+            if protocol == 'oid':
+                oid = int(token)
+                return jar.get(oid)
+
+            if protocol == 'file':
+                offset, length = map(int, token.split(':'))
+                return PersistentStream(self._opener, offset, length)
+
+            raise ValueError('Unknown protocol: %s.' % protocol)
+
+        unpickler.persistent_load = load
+
+        entries = []
+        while size > offset:
+            segment_type, segment = unpickler.load()
+
+            if segment_type == LOG_VERSION:
+                entries.append(segment)
+
+            elif segment_type == LOG_RECORD:
+                yield segment, entries
+                del entries[:]
+
+            elif segment_type == LOG_STREAM:
+                name, length = segment
+                stream.seek(length, os.SEEK_CUR)
+
+            offset = stream.tell()
+
+        if entries:
+            raise IntegrityError(
+                "Transaction record not found for %d entries." % len(entries))
 
     def _write(self, segment_type, data):
         try:
