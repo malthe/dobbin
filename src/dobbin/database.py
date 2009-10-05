@@ -103,7 +103,8 @@ class Manager(object):
         timestamp = self._thread.timestamp
 
         while registered:
-            for obj in tuple(registered):
+            batch = tuple(registered)
+            for obj in batch:
                 # assert that object belongs to this database
                 if obj._p_jar is not self:
                     raise InvalidObjectReference(obj)
@@ -113,13 +114,13 @@ class Manager(object):
                 if obj._p_serial > timestamp:
                     raise WriteConflictError(obj)
 
-                # ask storage to commit object state
-                self._storage.commit(obj, transaction)
-
-                # mark object as committed and remove it from the set of
-                # objects registered for this transaction
-                committed.add(obj)
+                self._storage.register(obj)
                 registered.remove(obj)
+
+            self._storage.commit(transaction)
+
+            for obj in batch:
+                committed.add(obj)
 
     def get(self, oid):
         try:
@@ -233,50 +234,54 @@ class Manager(object):
             self._lock_release()
 
     def _read(self):
-        oid2obj = self._oid2obj
-        conflicts = set()
-
         self._lock_acquire()
-
         try:
-            for oid, cls, state, timestamp in self._storage.read(self):
-                obj = oid2obj.get(oid)
-
-                # if the object does not exist in the database, we create
-                # it using the ``__new__`` constructor
-                if obj is None:
-                    obj = object.__new__(cls)
-                    state['_p_oid'] = oid
-                    oid2obj[oid] = obj
-                elif isinstance(obj, Local):
-                    # if our version of the object is persistent-local
-                    # then we have a write conflict; it may be
-                    # resolved, if the object provides a conflict
-                    # resolution method; it gets called with three
-                    # arguments: (old_state, saved_state, new_state).
-                    try:
-                        if obj._p_resolve_conflict is None:
-                            raise ReadConflictError(obj)
-                        state = obj._p_resolve_conflict(
-                            obj.__getstate__(), obj.__dict__, state)
-                    except ConflictError:
-                        conflicts.add(obj)
-                else:
-                    object.__setattr__(obj, "__class__", cls)
-
-                # update timestamp
-                state['_p_serial'] = timestamp
-
-                # associate with this database
-                state['_p_jar'] = self
-
-                # set shared state
-                obj.__setstate__(state)
-
-            if conflicts:
-                raise ReadConflictError(*conflicts)
+            self._restore(self)
         finally:
             self._lock_release()
+
+    def _restore(self, jar, snapshot=None):
+        mapping = jar._oid2obj
+        conflicts = set()
+        for oid, cls, state, timestamp in self._storage.read(jar):
+            if snapshot and timestamp > snapshot:
+                break
+
+            obj = mapping.get(oid)
+
+            # if the object does not exist in the database, we create
+            # it using the ``__new__`` constructor
+            if obj is None:
+                obj = object.__new__(cls)
+                state['_p_oid'] = oid
+                mapping[oid] = obj
+            elif isinstance(obj, Local):
+                # if our version of the object is persistent-local
+                # then we have a write conflict; it may be
+                # resolved, if the object provides a conflict
+                # resolution method; it gets called with three
+                # arguments: (old_state, saved_state, new_state).
+                try:
+                    if obj._p_resolve_conflict is None:
+                        raise ReadConflictError(obj)
+                    state = obj._p_resolve_conflict(
+                        obj.__getstate__(), obj.__dict__, state)
+                except ConflictError:
+                    conflicts.add(obj)
+            else:
+                object.__setattr__(obj, "__class__", cls)
+
+            # update timestamp
+            state['_p_serial'] = timestamp
+
+            # associate with this database
+            state['_p_jar'] = jar
+
+            # set shared state
+            obj.__setstate__(state)
+
+        if conflicts:
+            raise ReadConflictError(*conflicts)
 
     def _tpc_cleanup(self):
         """Performs cleanup operations to support ``tpc_finish`` and
