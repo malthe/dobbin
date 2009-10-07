@@ -6,11 +6,11 @@ convenient way to persist Python objects on disk.
 
 Key features:
 
-- Multi-thread, multi-process with no configuration
-- Persistent objects carry no overhead in general case
-- Threads share most object data
-- Does not attempt to manage memory
+- MVCC concurrency model
 - Implemented all in Python
+- Multi-thread, multi-process with no configuration
+- Zero object access overhead in general case
+- Optimal memory sharing between threads
 - Efficient storing and serving of binary streams
 - Architecture open to alternative storages
 

@@ -524,9 +524,9 @@ True
 Snapshots
 ---------
 
-We can use the ``snapshot`` method to merge transactions until a given
-timestamp and write a snapshot of the database state as a single
-transaction.
+We can use the ``snapshot`` method to merge all database transactions
+until a given timestamp and write the snapshot as a single transaction
+to a new database.
 
 >>> tmp_path = "%s.tmp" % database_path
 >>> tmp_db = Database(tmp_path)
