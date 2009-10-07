@@ -1,5 +1,6 @@
 import copy
 import os
+import operator
 import threading
 import transaction
 
@@ -69,6 +70,7 @@ class Persistent(object):
     _p_jar = None
     _p_oid = None
     _p_serial = None
+    _p_shared = property(operator.attrgetter("__dict__"))
     _p_resolve_conflict = None
 
     def __new__(cls, *args, **kwargs):
@@ -76,17 +78,17 @@ class Persistent(object):
         checkout(inst)
         return inst
 
-    @property
-    def _p_shared(self):
-        return self.__dict__
-
     def __deepcopy__(self, memo):
         # persistent objects are never deep-copied
         return self
 
     def __getstate__(self):
-        raise RuntimeError(
-            "Shared persistent objects are not serializable.")
+        state = self._p_local
+        if state is None:
+            raise RuntimeError(
+                "Object has no local state.")
+
+        return state.__dict__
 
     def __setattr__(self, key, value):
         raise RuntimeError("Can't set attribute in read-only mode.")
@@ -95,14 +97,14 @@ class Persistent(object):
         raise RuntimeError("Can't set item in read-only mode.")
 
     def __setstate__(self, new_state):
-        state = self._p_shared
+        shared = self._p_shared
         for key, value in new_state.items():
             if value is DELETE:
-                del state[key]
+                del shared[key]
             if value is IGNORE:
                 continue
             else:
-                state[key] = value
+                shared[key] = value
 
 class Broken(Persistent):
     def __new__(cls, oid):
@@ -124,14 +126,10 @@ class Local(Persistent):
     """
 
     _p_count = 0
-    _p_local = None
     _p_shared = None
 
     @property
     def __dict__(self):
-        return self._p_local.__dict__
-
-    def __getstate__(self):
         return self._p_local.__dict__
 
     def __setattr__(self, key, value):
@@ -242,21 +240,46 @@ class PersistentDict(Persistent):
         except KeyError:
             raise AttributeError(key)
 
-    def __setitem__(self, key, value):
-        self.__setattr__((key,), value)
-
     def __getitem__(self, key):
         return self.__getattr__((key,))
 
+    def __setitem__(self, key, value):
+        self.__setattr__((key,), value)
+
+    def __setstate__(self, new_state):
+        # the empty tuple is an internal flag to clear dictionary
+        # entries (whose keys are wrapped in a tuple)
+        if () in new_state:
+            shared = self._p_shared
+
+            # extract all non-tuple entries
+            attrs = []
+            for key in shared:
+                if isinstance(key, basestring):
+                    attrs.append((key, shared[key]))
+
+            shared.clear()
+            shared.update(dict(attrs))
+
+        super(PersistentDict, self).__setstate__(new_state)
+
+    def clear(self):
+        local = self.__dict__
+        local.clear()
+        local[()] = True
+
     def get(self, key, default=None):
         shared = self._p_shared
-        local = shared.get("_p_local")
+        local = self.__dict__
         key = (key,)
 
-        if local is not None:
-            value = local.__dict__.get(key, MARKER)
+        if local is not shared:
+            value = local.get(key, MARKER)
             if value is not MARKER:
                 return value
+
+            if () in local:
+                return default
 
         return shared.get(key, default)
 

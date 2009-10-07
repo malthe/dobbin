@@ -33,6 +33,31 @@ class PersistentDictTestCase(BaseTestCase):
         self.assertEqual(d['foo'], 'bar')
         self.assertEqual(d['bar'], 'boo')
 
+    def test_clear(self):
+        d = self._get_root()
+
+        # local
+        d['bar'] = 'foo'
+        transaction.commit()
+        checkout(d)
+        d.clear()
+        self.assertEqual(d.get('bar'), None)
+
+        # shared
+        transaction.commit()
+        self.assertEqual(d.get('bar'), None)
+
+        # local
+        checkout(d)
+        d.clear()
+        self.assertEqual(d.get('boo'), None)
+        d['boo'] = 'foo'
+        self.assertEqual(d.get('boo'), 'foo')
+
+        # shared
+        transaction.commit()
+        self.assertEqual(d.get('boo'), 'foo')
+
     def test_get(self):
         d = self._get_root()
 
