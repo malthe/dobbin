@@ -522,6 +522,44 @@ True
 >>> pdict.name
 'Bob'
 
+Snapshots
+---------
+
+We can use the ``snapshot`` method to merge transactions until a given
+timestamp and write a snapshot of the database state as a single
+transaction.
+
+>>> tmp_path = "%s.tmp" % database_path
+>>> tmp_db = Database(tmp_path)
+
+To include all transactions (i.e. the current state), we just pass the
+target database.
+
+>>> db.snapshot(tmp_db)
+
+The snapshot contains three objects.
+
+>>> len(tmp_db)
+3
+
+They were persisted in a single transaction.
+
+>>> tmp_db.tx_count
+1
+
+We can confirm that the state indeed matches that of the current
+database.
+
+>>> tmp_obj = tmp_db.root
+>>> tmp_obj.name
+'Ian'
+
+>>> tmp_obj.another.name
+'Karla'
+
+>>> "".join(tmp_obj.file)
+'abc'
+
 Cleanup
 -------
 

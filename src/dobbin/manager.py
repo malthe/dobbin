@@ -168,6 +168,18 @@ class Manager(object):
     def save(self, obj):
         self._register(obj)
 
+    def snapshot(self, database, timestamp=None):
+        """Return database snapshot."""
+
+        # restore snapshot from database
+        for record in self._read(database, end=timestamp):
+            pass
+
+        # write snapshot to storage
+        tx = transaction.Transaction()
+        tx.join(database)
+        tx.commit()
+
     def sortKey(self):
         """Sort-key.
 
@@ -219,7 +231,7 @@ class Manager(object):
             return True
         return False
 
-    def _read(self, jar, start, end=None):
+    def _read(self, jar, start=None, end=None):
         mapping = jar._oid2obj
         conflicts = set()
 

@@ -3,6 +3,9 @@ Changes
 
 In next release...
 
+- Implemented method to create a snapshot of particular moment in an
+  existing database.
+
 - Added ``PersistentDict`` class. Due to changes in the ``Persistent``
   superclass, this dictionary is little more than sugar coating to
   implement the standard dictionary interface.
