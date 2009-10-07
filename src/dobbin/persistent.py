@@ -4,7 +4,6 @@ import threading
 import transaction
 
 from dobbin.exc import ObjectGraphError
-from dobbin.utils import localset
 
 MARKER = object()
 DELETE = object()
@@ -301,42 +300,40 @@ class PersistentFile(threading.local):
     def read(self, size=-1):
         return self.stream.read(size)
 
-class UnconnectedSync(object):
-    _tx_manager = transaction.manager
-    _unconnected = localset()
-
+class UnconnectedSync(threading.local):
     def __init__(self):
-        self._tx_manager.registerSynch(self)
+        transaction.manager.registerSynch(self)
+        self._unconnected = set()
 
     def __call__(self, obj):
         self._unconnected.add(obj)
 
-    def abort(self, transaction):
+    def abort(self, tx):
         pass
 
-    def afterCompletion(self, transaction):
+    def afterCompletion(self, tx):
         pass
 
-    def beforeCompletion(self, transaction):
+    def beforeCompletion(self, tx):
         if self._unconnected:
-            self._tx_manager.get().join(self)
+            transaction.get().join(self)
 
-    def newTransaction(self, transaction):
+    def newTransaction(self, tx):
         pass
 
-    def commit(self, transaction):
+    def commit(self, tx):
         pass
 
     def sortKey(self):
         return -1
 
-    def tpc_begin(self, transaction):
+    def tpc_begin(self, tx):
         pass
 
-    def tpc_abort(self, transaction):
+    def tpc_abort(self, tx):
         self._unconnected.clear()
 
-    def tpc_vote(self, transaction):
+    def tpc_vote(self, tx):
         unconnected = self._unconnected
         while unconnected:
             obj = unconnected.pop()
@@ -345,7 +342,7 @@ class UnconnectedSync(object):
                 raise ObjectGraphError(
                     "%s not connected to graph." % repr(obj))
 
-    def tpc_finish(self, transaction):
+    def tpc_finish(self, tx):
         self._unconnected.clear()
 
 sync = UnconnectedSync()

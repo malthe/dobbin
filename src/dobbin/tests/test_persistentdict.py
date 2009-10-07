@@ -6,10 +6,10 @@ import transaction
 
 class PersistentDictTestCase(BaseTestCase):
     def _get_root(self):
-        assert self.database.get_root() is None
+        assert self.database.root is None
         root = PersistentDict()
         checkout(root)
-        self.database.set_root(root)
+        self.database.elect(root)
         return root
 
     def test_assignment(self):

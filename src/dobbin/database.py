@@ -1,342 +1,416 @@
 import logging
+import mmap
+import os
+import re
+import shutil
 import threading
-import transaction
+import cPickle as pickle
+from cStringIO import StringIO
 
-from dobbin.exc import InvalidObjectReference
-from dobbin.exc import WriteConflictError
-from dobbin.exc import ReadConflictError
-from dobbin.exc import ConflictError
-from dobbin.persistent import retract
-from dobbin.persistent import Broken
+from fcntl import flock
+from fcntl import LOCK_EX
+from fcntl import LOCK_UN
+from fcntl import LOCK_NB
+
+from dobbin.exc import IntegrityError
 from dobbin.persistent import Local
 from dobbin.persistent import Persistent
+from dobbin.persistent import PersistentFile
+from dobbin.persistent import undo_persistent_local
 from dobbin.utils import make_timestamp
+from dobbin.manager import Manager
 
-ROOT_OID = 0
+# transaction log segment types
+LOG_VERSION = 0
+LOG_RECORD = 1
+LOG_STREAM = 2
 
-log = logging.getLogger("dobbin.database")
+re_id = re.compile(r'(?P<protocol>[a-z]+)://(?P<token>[0-9:]+)')
+logger = logging.getLogger('dobbin.storage')
 
-marker = object()
+class Database(Manager):
+    """Object database which stores data in a single file."""
 
-class Manager(object):
-    """Transactional object manager.
+    _rstream = None
+    _wstream = None
+    _oid = 0
 
-    This class provides low-level functionality to support an object
-    database which implements two-phase commit using the
-    ``transaction`` package.
+    def __init__(self, path):
+        self._path = path
+
+        # open stream for reading
+        self._open()
+
+        # pickle writer
+        self._buffer = StringIO()
+        self._pickler = pickle.Pickler(self._buffer)
+        self._offsets = {}
+
+        super(Database, self).__init__()
+
+    def read(self, jar, timestamp):
+        """Read transactions newer than ``timestamp``."""
+
+        if timestamp is None:
+            offset = 0
+        else:
+            try:
+                offset = self._offsets[timestamp]
+            except KeyError:
+                raise ValueError("No offset found for timestamp: %s." % timestamp)
+
+        stream = self._open_mmap(offset)
+        if stream is None:
+            return
+
+        size = stream.size()
+        unpickler = pickle.Unpickler(stream)
+
+        def load(oid):
+            match = re_id.match(oid)
+            if match is None:
+                raise ValueError('Protocol mismatch: %s.' % oid)
+
+            protocol = match.group('protocol')
+            token = match.group('token')
+
+            if protocol == 'oid':
+                oid = int(token)
+                return jar.get(oid)
+
+            if protocol == 'file':
+                offset, length = map(int, token.split(':'))
+                return PersistentStream(self._opener, offset, length)
+
+            raise ValueError('Unknown protocol: %s.' % protocol)
+
+        unpickler.persistent_load = load
+
+        entries = []
+        while size > offset:
+            segment_type, segment = unpickler.load()
+            offset = stream.tell()
+
+            if segment_type == LOG_VERSION:
+                entries.append(segment)
+
+            elif segment_type == LOG_RECORD:
+                self._offsets[segment.timestamp] = offset
+                yield segment, entries
+                del entries[:]
+
+            elif segment_type == LOG_STREAM:
+                name, length = segment
+                stream.seek(length, os.SEEK_CUR)
+
+        if entries:
+            raise IntegrityError(
+                "Transaction record not found for %d entries." % len(entries))
+
+    def tpc_abort(self, transaction):
+        self.lock_acquire()
+        try:
+            if transaction is not self.tx_ref:
+                return
+            try:
+                # write transaction record
+                self._write(LOG_RECORD, TransactionRecord(self.tx_timestamp, False))
+                self._flush()
+            finally:
+                # update transaction state
+                self.tx_ref = None
+
+                # release commit-lock
+                self._commitlock_release()
+
+                # close stream
+                self._wstream.close()
+        finally:
+            self.lock_release()
+
+        super(Database, self).tpc_abort(transaction)
+
+    def tpc_begin(self, transaction):
+        self.lock_acquire()
+        try:
+            if self.tx_ref is transaction:
+                return
+
+            self.lock_release()
+
+            # open write stream
+            wstream = self._wstream = file(self._path, 'ab+')
+
+            # acquire commit lock
+            fd = wstream.fileno()
+            self._commitlock_acquire = lambda: flock(fd, LOCK_EX | LOCK_NB)
+            self._commitlock_release = lambda: flock(fd, LOCK_UN)
+
+            try:
+                self._commitlock_acquire()
+            except IOError:
+                self.lock_acquire()
+                self.tx_ref = None
+                raise
+
+            # acquire lock and store transaction
+            self.lock_acquire()
+            self.tx_ref = transaction
+
+            # clear pickle memory; we shouldn't actually have to do
+            # this---since we're anyway reading the log from the
+            # beginning; XXX: look into this further
+            self._pickler.clear_memo()
+        finally:
+            self.lock_release()
+
+        super(Database, self).tpc_begin(transaction)
+
+    def tpc_vote(self, transaction):
+        self.lock_acquire()
+        try:
+            if transaction is not self.tx_ref:
+                return
+        finally:
+            self.lock_release()
+
+        super(Database, self).tpc_vote(transaction)
+
+    def tpc_finish(self, transaction):
+        self.lock_acquire()
+        try:
+            if transaction is not self.tx_ref:
+                return
+            try:
+                # write transaction record
+                self._write(LOG_RECORD, TransactionRecord(self.tx_timestamp, True))
+                self._flush()
+            finally:
+                # update transaction state
+                self.tx_ref = None
+
+                # release commit-lock
+                self._commitlock_release()
+
+                # close stream
+                self._wstream.close()
+        finally:
+            self.lock_release()
+
+        super(Database, self).tpc_finish(transaction)
+
+    def write(self, obj):
+        jar = obj._p_jar
+        oid = obj._p_oid
+        state = obj.__getstate__()
+        cls = undo_persistent_local(obj.__class__)
+
+        if oid is None:
+            oid = self._new_oid(obj)
+
+        deferred = []
+
+        def persistent_id(obj):
+            """This closure provides persistent identifier tokens for
+            persistent objects and files.
+            """
+
+            if isinstance(obj, Persistent):
+                if obj._p_jar is None:
+                    jar.add(obj)
+
+                oid = obj._p_oid
+                if oid is None:
+                    oid = self._new_oid(obj)
+
+                return "oid://%d" % oid
+
+            if isinstance(obj, PersistentStream):
+                return "file://%d:%d" % (obj.offset, obj.length)
+
+            if isinstance(obj, PersistentFile):
+                # compute file length
+                offset = obj.tell()
+                obj.seek(0, os.SEEK_END)
+                length = obj.tell() - offset
+                obj.seek(offset)
+
+                # write transaction log segment
+                offset = self._write_unbuffered(LOG_STREAM, (obj.name, length))
+                self._write_stream(obj, length)
+
+                # switch identity to transaction stream
+                obj.__dict__.clear()
+                obj.__class__ = PersistentStream
+                obj.__init__(self._opener, offset, length)
+
+                return "file://%d:%d" % (offset, length)
+
+            if isinstance(obj, file):
+                raise TypeError(
+                    "Can't persist files; use the ``PersistentFile`` wrapper.")
+
+        self._pickler.persistent_id = persistent_id
+
+        # pickle object state; note that the pickler instance is set
+        # up to write to a buffer in memory --- the reason being that
+        # pickling may fail, which is likely to result in integrity
+        # errors if we write directly to disk (another critical
+        # benefit is that the ``persistent_id`` method is free to
+        # write data to disk, circumventing the pickle buffer; this is
+        # used to write file streams in parallel with the pickle
+        # operation); all in all: brittle machinery.
+        self._write(LOG_VERSION, (oid, cls, state))
+
+    def _flush(self, offset=0):
+        stream = self._buffer
+
+        # persist changes on disk
+        stream.seek(offset)
+        bytes = stream.read()
+        self._wstream.write(bytes)
+
+        # truncate stream
+        stream.seek(offset)
+        stream.truncate()
+
+        # update offset mapping
+        offset = self._wstream.tell()
+        self._offsets[self.tx_timestamp] = offset
+
+        return offset
+
+    def _open(self):
+        if os.path.exists(self._path):
+            f = self._rstream = file(self._path, 'rb+')
+            return f
+
+    def _open_mmap(self, offset=0):
+        if self._rstream is None and not self._open():
+            return
+
+        try:
+            _map = mmap.mmap(self._rstream.fileno(), 0, mmap.PROT_READ)
+            _map.seek(offset)
+        except (ValueError, mmap.error):
+            return
+        return _map
+
+    def _opener(self):
+        return file(self._path, 'rb')
+
+    def _new_oid(self, obj):
+        oid = obj._p_oid = self._oid + 1
+        self._oid = oid
+        return oid
+
+    def _write(self, segment_type, data):
+        try:
+            self._pickler.dump((segment_type, data))
+        except:
+            logger.critical("Could not pickle data: %s (type %d)." % (
+                repr(data), segment_type))
+            self._flush()
+            raise
+
+    def _write_unbuffered(self, segment_type, data):
+        offset = self._buffer.tell()
+        self._write(segment_type, data)
+        return self._flush(offset)
+
+    def _write_stream(self, stream, length):
+        shutil.copyfileobj(stream, self._wstream, length)
+
+class TransactionRecord(object):
+    def __init__(self, timestamp, status):
+        self.timestamp = timestamp
+        self.status = status
+
+class PersistentStream(threading.local):
+    """Binary stream persisted in the transaction log.
+
+    Features a file-like API as well as iteration (independent from
+    each other; iteration will always acquire its own file handle).
     """
 
-    _tx_manager = transaction.manager
+    stream = None
+    chunk_size = 32768
 
-    def __init__(self, storage):
-        self._storage = storage
-        self._thread = ThreadState()
-        self._tx_manager.registerSynch(self)
-
-        # persistent-id to object mapping
-        self._oid2obj = {}
-
-        # acquire locks
-        l = threading.RLock()
-        self._lock_acquire = l.acquire
-        self._lock_release = l.release
-
-        # load objects from storage
-        self._read()
+    def __init__(self, opener, offset, length):
+        self._opener = opener
+        self.offset = offset
+        self.length = length
 
     def __deepcopy__(self, memo):
         return self
 
-    def __getitem__(self, oid):
-        return self._oid2obj[oid]
+    def __iter__(self):
+        """Iterate through stream.
 
-    def __len__(self):
-        return len(self._oid2obj)
-
-    def __repr__(self):
-        return '<%s size="%d" storage="%s">' % (
-            type(self).__name__,
-            len(self),
-            type(self._storage).__name__)
-
-    def abort(self, transaction):
-        """Abort changes."""
-
-        self.revert(self._thread.registered)
-        self.revert(self._thread.committed)
-
-    def add(self, obj):
-        """Add an object to the database.
-
-        Note that the recommended way to add objects is through the
-        root object graph.
+        We always open a new file handle, detached entirely from the
+        instance. It's automatically closed when the handle is
+        garbage-collected since it falls out of scope at the end of
+        the method.
         """
 
-        if not isinstance(obj, Persistent):
-            raise TypeError(
-                "Can't add non-persistent object.")
+        f = self._opener()
+        f.seek(self.offset)
 
-        if not isinstance(obj, Local):
-            raise TypeError(
-                "Check out object before adding it to the database.")
+        remaining = self.length
+        chunk_size = self.chunk_size
+        read = self.read
 
-        if obj._p_jar is None:
-            obj._p_jar = self
-            self.register(obj)
-        elif obj._p_jar is self:
-            raise RuntimeError(
-                "Object already added to the database.")
-        else:
-            raise InvalidObjectReference(obj)
+        while remaining > 0:
+            count = min(chunk_size, remaining)
+            bytes = read(remaining, f)
+            remaining -= len(bytes)
+            yield bytes
 
-    def afterCompletion(self, transaction):
-        pass
-
-    def beforeCompletion(self, transaction):
-        pass
-
-    def commit(self, transaction):
-        """Commit changes to disk."""
-
-        committed = self._thread.committed
-        registered = self._thread.registered
-        timestamp = self._thread.timestamp
-
-        while registered:
-            batch = tuple(registered)
-            for obj in batch:
-                # assert that object belongs to this database
-                if obj._p_jar is not self:
-                    raise InvalidObjectReference(obj)
-
-                # if the object has been updated since we begun our
-                # transaction, it's a write-conflict.
-                if obj._p_serial > timestamp:
-                    raise WriteConflictError(obj)
-
-                self._storage.register(obj)
-                registered.remove(obj)
-
-            self._storage.commit(transaction)
-
-            for obj in batch:
-                committed.add(obj)
-
-    def get(self, oid):
-        try:
-            obj = self._oid2obj[oid]
-        except KeyError:
-            obj = Broken(oid)
-            self._oid2obj[oid] = obj
-        return obj
-
-    def newTransaction(self, transaction):
-        """New transaction.
-
-        We catch up on potential out-of-process transactions.
-        """
-
-        self._read()
-
-    def register(self, obj):
-        if self._thread.needs_to_join:
-            self._tx_manager.get().join(self)
-            self._thread.needs_to_join = False
-            self._thread.timestamp = make_timestamp()
-
-        # if the object has not already been registered with this
-        # thread we do so and update the thread-use count
-        registered = self._thread.registered
-        if obj not in registered:
-            registered.add(obj)
-            obj._p_count += 1
-
-    def revert(self, objects):
-        while objects:
-            obj = objects.pop()
-            self._unregister(obj)
-
-    def save(self, obj):
-        self.register(obj)
-
-    def sortKey(self):
-        """Sort-key.
-
-        This method is required by the transaction machinery; the key
-        returned guarantees that the first thread to check out an
-        object wins the transaction.
-        """
-
-        return id(self), self._thread.timestamp
-
-    def tpc_abort(self, transaction):
-        """Abort transaction.
-
-        Called when an exception occurred during ``tpc_vote`` or
-        ``tpc_finish``.
-        """
-
-        # update timestamp
-        timestamp = self._update_timestamp()
-
-        self._storage.tpc_abort(transaction, timestamp)
-        self._tpc_cleanup()
-
-    def tpc_begin(self, transaction):
-        """Begin commit (two-phase) of a transaction."""
-
-        # begin transaction on storage layer; the storage layer is
-        # responsible for obtaining exclusive access to the database
-        self._storage.tpc_begin(transaction)
-
-        # catch up on transactions; other processes may have committed
-        # transactions which may conflict
-        self._read()
-
-    def tpc_vote(self, transaction):
-        """Vote on transaction."""
-
-        # pass vote to storage layer
-        self._storage.tpc_vote(transaction)
-
-    def tpc_finish(self, transaction):
-        """Indicate confirmation that the transaction is done."""
-
-        # update timestamp
-        timestamp = self._update_timestamp()
-
-        if self._thread.registered:
-            log.critical("Some objects were not committed.")
-
-        oid2obj = self._oid2obj
-        for obj in self._thread.committed:
-            oid2obj[obj._p_oid] = obj
-
-            state = obj.__getstate__()
-            obj.__setstate__(state)
-            obj._p_serial = timestamp
-
-            # unregister object with this transaction
-            self._unregister(obj)
-
-        self._storage.tpc_finish(transaction, timestamp)
-        self._tpc_cleanup()
-
-    def _maybe_share_object(self, obj):
-        self._lock_acquire()
-
-        try:
-            if obj._p_count == 0:
-                retract(obj)
-                return True
-            return False
-        finally:
-            self._lock_release()
-
-    def _read(self):
-        self._lock_acquire()
-        try:
-            self._restore(self)
-        finally:
-            self._lock_release()
-
-    def _restore(self, jar, snapshot=None):
-        mapping = jar._oid2obj
-        conflicts = set()
-        for oid, cls, state, timestamp in self._storage.read(jar):
-            if snapshot and timestamp > snapshot:
-                break
-
-            obj = mapping.get(oid)
-
-            # if the object does not exist in the database, we create
-            # it using the ``__new__`` constructor
-            if obj is None:
-                obj = object.__new__(cls)
-                state['_p_oid'] = oid
-                mapping[oid] = obj
-            elif isinstance(obj, Local):
-                # if our version of the object is persistent-local
-                # then we have a write conflict; it may be
-                # resolved, if the object provides a conflict
-                # resolution method; it gets called with three
-                # arguments: (old_state, saved_state, new_state).
-                try:
-                    if obj._p_resolve_conflict is None:
-                        raise ReadConflictError(obj)
-                    state = obj._p_resolve_conflict(
-                        obj.__getstate__(), obj.__dict__, state)
-                except ConflictError:
-                    conflicts.add(obj)
-            else:
-                object.__setattr__(obj, "__class__", cls)
-
-            # update timestamp
-            state['_p_serial'] = timestamp
-
-            # associate with this database
-            state['_p_jar'] = jar
-
-            # set shared state
-            obj.__setstate__(state)
-
-        if conflicts:
-            raise ReadConflictError(*conflicts)
-
-    def _tpc_cleanup(self):
-        """Performs cleanup operations to support ``tpc_finish`` and
-        ``tpc_abort``."""
-
-        self._thread.registered.clear()
-        self._thread.committed.clear()
-        self._thread.needs_to_join = True
-
-    def _unregister(self, obj):
-        obj._p_count -= 1
-        if self._maybe_share_object(obj):
+    @property
+    def closed(self):
+        stream = self.stream
+        if stream is None:
             return True
-        obj.__dict__.clear()
+        return self.stream.closed
 
-    def _update_timestamp(self):
-        timestamp = self._thread.timestamp = make_timestamp()
-        return timestamp
+    @property
+    def name(self):
+        return self.stream.name
 
-class Database(Manager):
-    """Transactional object database.
+    def close(self):
+        if self.stream is None:
+            raise RuntimeError("File already closed.")
 
-    Database instances are thread-safe; for optimal performance and
-    memory usage, threads should share the same object graph (if they
-    need access to the same database).
+        self.stream.close()
+        self.stream = None
 
-    :param storage: storage instance
-    """
+    def open(self):
+        if self.stream is not None:
+            raise RuntimeError("File already open.")
 
-    def get_root(self):
-        try:
-            return self[ROOT_OID]
-        except KeyError:
-            return
+        # open file for reading
+        self.stream = self._opener()
 
-    def set_root(self, obj):
-        if not isinstance(obj, Persistent):
-            raise TypeError(
-                "Can't set non-persistent object as database root.")
+        # seek to offset, if required
+        if self.offset is not None:
+            self.stream.seek(self.offset)
 
-        if obj._p_oid is not None:
-            raise ValueError("Can't elect already persisted root object.")
+    def read(self, size=None, stream=None):
+        if stream is None:
+            stream = self.stream
+            if stream is None:
+                raise ValueError("File not open for reading.")
+        if size is None:
+            size = self.length
+        return stream.read(min(size, self.length))
 
-        if self.get_root() is not None:
-            raise RuntimeError("Database root already set.")
+    def seek(self, offset, whence=os.SEEK_SET):
+        if self.offset is not None:
+            offset += self.offset
+        self.stream.seek(offset, whence)
 
-        self.add(obj)
-        obj._p_oid = ROOT_OID
-        obj._p_jar = self
-
-class ThreadState(threading.local):
-    """Thread-local database state."""
-
-    def __init__(self):
-        self.registered = set()
-        self.committed = set()
-        self.needs_to_join = True
-        self.timestamp = None
+    def tell(self):
+        offset = self.stream.tell()
+        if self.offset is not None:
+            offset -= self.offset
+        return offset

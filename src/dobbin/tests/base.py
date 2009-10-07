@@ -1,13 +1,14 @@
 import unittest
 import tempfile
+import transaction
 
 class BaseTestCase(unittest.TestCase):
     def setUp(self):
-        from dobbin.storage import TransactionLog
-        self._tempfile = tempfile.NamedTemporaryFile()
-        storage = TransactionLog(self._tempfile.name)
         from dobbin.database import Database
-        self.database = Database(storage)
+        self._tempfile = tempfile.NamedTemporaryFile()
+        self.database = Database(self._tempfile.name)
+        transaction.begin()
 
     def tearDown(self):
         self._tempfile.close()
+        transaction.abort()

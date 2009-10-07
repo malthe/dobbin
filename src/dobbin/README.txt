@@ -12,42 +12,33 @@ $ python setup.py test
 Setup
 -----
 
-The first step is to connect the database to storage. The database
-storage layer is abstracted; included with the database is an
-implementation which logs transactions to a file, optimized for
+The database stores transactions in a single file. It's optimized for
 long-running processes, e.g. application servers.
 
-To configure the transaction log, we simply provide a path. It needn't
-point to an existing file; upon the first commit to the database, the
-file will be created.
-
->>> from dobbin.storage import TransactionLog
->>> storage = TransactionLog(database_path)
-
-We pass the storage to the database constructor for initialization.
+The first step is to initialize a database object. To configure it we
+provide a path on the file system. The path needn't exist already.
 
 >>> from dobbin.database import Database
->>> db = Database(storage)
+>>> db = Database(database_path)
 
-The database is empty to begin; we can verify this by using the
-``len`` method to determine the number of objects stored.
+This particular path does not already exist. This is a new
+database. We can verify it by using the ``len`` method to determine
+the number of objects stored.
 
 >>> len(db)
 0
 
-This object database uses an object graph persistency model, that is,
-all persisted objects must be connected to the same graph. Connected
-in this context means that another connected object owns a
-Python-reference to it.
+The database uses an object graph persistency model. Objects must be
+transitively connected to the root node of the database (by Python
+reference).
 
-The empty database has no elected root object; if we ask for it, we
-simply get ``None`` as the answer.
+Since this is an empty database, there is no root object yet.
 
->>> db.get_root() is None
+>>> db.root is None
 True
 
-Setting the root
-----------------
+Checking out an object
+----------------------
 
 Any persistent object can be elected as the database root
 object. Persistent objects must inherit from the ``Persistent``
@@ -97,9 +88,7 @@ Electing a database root
 
 We can elect this object as the root of the database.
 
->>> db.set_root(obj)
->>> obj._p_oid
-0
+>>> db.elect(obj)
 >>> obj._p_jar is db
 True
 
@@ -113,10 +102,10 @@ As expected, the database contains one object.
 >>> len(db)
 1
 
-The storage layer should report that a single transaction has been
-logged.
+The ``tx_count`` attribute returns the number of transactions which
+have been written to the database (successful and failed).
 
->>> len(storage)
+>>> db.tx_count
 1
 
 Transactions
@@ -131,27 +120,28 @@ transaction.
 
 Verify transaction count.
 
->>> len(storage)
+>>> db.tx_count
 2
 
 Sharing the database
 --------------------
 
-While the database is inherently thread-safe, it's up to the storage
-layer to manage sharing between instances (which may run in different
-processes; no distinction is made). The transaction log may be shared
-transparently between processes; no configuration is required.
+The object manager (which implements the low-level functionality) is
+inherently thread-safe. It's up to the database which sits on top of
+the object manager to support sharing between external actors.
 
-To illustrate the point in a simple environment, let's configure a
-second instance which runs in the same thread.
+The included implementation support sharing transparently (using file
+locking); no configuration is required.
 
->>> new_storage = TransactionLog(database_path)
->>> new_db = Database(new_storage)
+To illustrate this in a simple environment, we'll configure a second
+instance which runs in the same thread.
+
+>>> new_db = Database(database_path)
 
 Objects from this database are new instances, too. The object graphs
 between different database instances are disjoint.
 
->>> new_obj = new_db.get_root()
+>>> new_obj = new_db.root
 >>> new_obj is obj
 False
 >>> new_obj._p_jar is new_db
@@ -170,7 +160,7 @@ transaction.
 >>> checkout(obj)
 >>> obj.name = 'Jane'
 >>> transaction.commit()
->>> len(storage)
+>>> db.tx_count
 3
 
 At this point, the second database won't be up-to-date.
@@ -194,13 +184,15 @@ resolution, both may.
 
 .. note:: There is no built-in conflict resolution in the persistent base class.
 
-In a new thread, we check out an object, make changes to it, then wait
-for a semaphore before we commit.
+In a new thread, we check out the root object, make changes to it,
+then wait for a semaphore before we commit.
 
 >>> from threading import Semaphore
 >>> flag = Semaphore()
 
 >>> def run():
+...     obj = db.root
+...     assert obj is not None
 ...     checkout(obj)
 ...     obj.name = 'Bob'
 ...     flag.acquire()
@@ -228,7 +220,7 @@ transaction.
 
 The transaction was committed.
 
->>> len(storage)
+>>> db.tx_count
 4
 
 Trying to commit the transaction in the main thread, we get a write
@@ -242,7 +234,7 @@ WriteConflictError...
 The commit failed; this has implications beyond the exception being
 raised. A transaction record was written to disk.
 
->>> len(storage)
+>>> db.tx_count
 5
 
 Checked out objects have been reverted to the state of the most recent
@@ -276,13 +268,15 @@ up-to-date.
 
 >>> tx = transaction.begin()
 
-Confirm that the storages are indeed up-to-date (and have registered
+Confirm that the databases are indeed up-to-date (and have registered
 the same number of transactions).
 
->>> len(storage) == len(new_storage)
+>>> db.tx_count == new_db.tx_count
 True
 
 >>> def run():
+...     new_obj = new_db.root
+...     assert new_obj is not None
 ...     checkout(new_obj)
 ...     new_obj.name = 'Ian'
 ...     flag.acquire()
@@ -309,12 +303,12 @@ transaction.
 
 The transaction was committed.
 
->>> len(new_storage)
+>>> new_db.tx_count
 6
 
-If try to commit the transaction in the main thread, we get a read
-conflict; the reason why it's not a write conflict is that the storage
-first catches up on new transactions which causes a read conflict.
+If we attempt a commit in the main thread, a read conflict is raised;
+the reason why it's not a write conflict is that the database first
+catches up on new transactions.
 
 >>> transaction.commit()
 Traceback (most recent call last):
@@ -323,7 +317,7 @@ ReadConflictError...
 
 Again, the failed transaction is recorded.
 
->>> len(storage)
+>>> db.tx_count
 7
 
 The state of the object reflects the transaction which was committed
@@ -362,7 +356,7 @@ object using an attribute reference.
 
 We commit the transaction and observe that the object count has
 grown. The new object has been assigned an oid as well (these are not
-in general predictable; they are assigned by the storage).
+in general predictable; they are assigned by the database on commit).
 
 >>> transaction.commit()
 >>> len(db)
@@ -422,13 +416,13 @@ Let's store this persistent file as an attribute on our object.
 >>> obj.file = pfile
 >>> transaction.commit()
 
-Note that the persistent file has been given a new class by the
-storage layer. It's the same object (in terms of object identity), but
-since it's now stored in the database and is only available as a file
-stream, we call it a *persistent stream*.
+Note that the persistent file has been given a new class. It's the
+same object (in terms of object identity), but since it's now stored
+in the database and is only available as a file stream, we call it a
+*persistent stream*.
 
 >>> obj.file
-<dobbin.storage.PersistentStream object at ...>
+<dobbin.database.PersistentStream object at ...>
 
 We must manually close the file we provided to the persistent wrapper
 (or let it fall out of scope).
@@ -497,36 +491,36 @@ used (directly, or subclassed).
 It operates as a normal Python dictionary and provides the same
 methods.
 
-  >>> from dobbin.persistent import PersistentDict
-  >>> pdict = PersistentDict()
+>>> from dobbin.persistent import PersistentDict
+>>> pdict = PersistentDict()
 
 Check out objects and connect to object graph.
 
-  >>> checkout(obj)
-  >>> checkout(pdict)
-  >>> obj.pdict = pdict
+>>> checkout(obj)
+>>> checkout(pdict)
+>>> obj.pdict = pdict
 
 You can store any key/value combination that works with standard
 dictionaries.
 
-  >>> pdict['obj'] = obj
-  >>> pdict['obj'] is obj
-  True
+>>> pdict['obj'] = obj
+>>> pdict['obj'] is obj
+True
 
 The ``PersistentDict`` stores attributes, too. Note that attributes
 and dictionary entries are independent from each other.
 
-  >>> pdict.name = 'Bob'
-  >>> pdict.name
-  'Bob'
+>>> pdict.name = 'Bob'
+>>> pdict.name
+'Bob'
 
 Committing the changes.
 
-  >>> transaction.commit()
-  >>> pdict['obj'] is obj
-  True
-  >>> pdict.name
-  'Bob'
+>>> transaction.commit()
+>>> pdict['obj'] is obj
+True
+>>> pdict.name
+'Bob'
 
 Cleanup
 -------

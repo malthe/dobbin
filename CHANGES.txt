@@ -4,8 +4,8 @@ Changes
 In next release...
 
 - Added ``PersistentDict`` class. Due to changes in the ``Persistent``
-  superclass, this dictionary is little more than sugar coating and
-  the implementation of the standard dictionary interface.
+  superclass, this dictionary is little more than sugar coating to
+  implement the standard dictionary interface.
 
 - The ``Persistent`` class is now persisted as changesets rather than
   complete object state.

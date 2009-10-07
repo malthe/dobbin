@@ -7,10 +7,10 @@ information in this section, especially before deployment.
 Configuration
 -------------
 
-The default storage option (the transaction log) keeps data in a
-single file. Multiple processes may connect to the same file and share
-the same database. No further configuration is required; the storage
-uses native file-locking to ensure exclusive write-access.
+The included database implementation writes transactions to a single
+file. Multiple processes may connect to the same file and share the
+same database. No further configuration is required; the database uses
+native file-locking to ensure exclusive write-access.
 
 .. warning:: To avoid memory thrashing, limit the physical memory allowance of your Python processes and make sure there is enough virtual memory available (at least the size of your database) [#]_.
 

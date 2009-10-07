@@ -12,6 +12,7 @@ Key features:
 - Does not attempt to manage memory
 - Implemented all in Python
 - Efficient storing and serving of binary streams
+- Architecture open to alternative storages
 
 Author and license
 ------------------
