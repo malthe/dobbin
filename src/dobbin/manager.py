@@ -14,7 +14,7 @@ from dobbin.utils import make_timestamp
 
 ROOT_OID = 0
 
-log = logging.getLogger("dobbin.common")
+log = logging.getLogger("dobbin.manager")
 
 marker = object()
 

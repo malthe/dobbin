@@ -26,7 +26,7 @@ LOG_RECORD = 1
 LOG_STREAM = 2
 
 re_id = re.compile(r'(?P<protocol>[a-z]+)://(?P<token>[0-9:]+)')
-logger = logging.getLogger('dobbin.storage')
+logger = logging.getLogger('dobbin.database')
 
 class Database(Manager):
     """Object database which stores data in a single file."""
