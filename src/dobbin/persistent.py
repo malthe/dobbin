@@ -55,12 +55,6 @@ def undo_persistent_local(cls):
 
     return cls.__bases__[1]
 
-def update_local(inst, _p_local_dict):
-    """Updates local dictionary with a deep copy of the shared state."""
-
-    __dict__ = object.__getattribute__(inst, "__dict__")
-    _p_local_dict.update(copy.deepcopy(__dict__))
-
 class Persistent(object):
     """Persistent base class.
 
