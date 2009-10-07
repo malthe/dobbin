@@ -125,53 +125,56 @@ This increases the transaction count by one.
 >>> db.tx_count
 2
 
-Sharing the database
---------------------
+Concurrency
+-----------
 
 The object manager (which implements the low-level functionality) is
-inherently thread-safe. It's up to the database which sits on top of
-the object manager to support sharing between external actors.
+inherently thread-safe; it uses the MMVC concurrency model.
 
-The included implementation support sharing transparently (using file
-locking); no configuration is required.
+It's up to the database which sits on top of the object manager to
+support concurrency between external processes sharing the same
+database (the included database implementation uses a file-locking
+scheme to extend the MVCC concurrency model to external processes; no
+configuration is required).
 
-To illustrate this in a simple environment, we'll configure a second
-instance which runs in the same thread.
+We can demonstrate concurrency between two separate processes by
+running a second database instance in the same thread.
 
 >>> new_db = Database(database_path)
-
-Objects from this database are new instances, too. The object graphs
-between different database instances are disjoint.
-
 >>> new_obj = new_db.root
+
+Objects from this database are disjoint from those of the first
+database.
+
 >>> new_obj is obj
 False
->>> new_obj._p_jar is new_db
-True
 
-Transactions propagate between instances of the same database.
+The new database instance has already read the previously committed
+transactions and applied them to its object graph.
 
 >>> new_obj.name
 'James'
 
-Let's examine this further. If we checkout the persistent object from
-the first database instance and commit the changes, the same object
-from the second database will be updated when we enter a new
+Let's examine this further. If we check out a persistent object from
+the first database instance and commit the changes, that same object
+from the second database will be updated as soon as we begin a new
 transaction.
 
 >>> checkout(obj)
 >>> obj.name = 'Jane'
 >>> transaction.commit()
->>> db.tx_count
-3
 
-At this point, the second database won't be up-to-date.
+The database has registered the transaction; the new instance hasn't.
+
+>>> db.tx_count - new_db.tx_count
+1
+
+The object graphs are not synchronized.
 
 >>> new_obj.name
 'James'
 
-When we enter a new transaction, the two instances will again be in
-sync.
+Applications must begin a new transaction to stay in sync.
 
 >>> tx = transaction.begin()
 >>> new_obj.name
@@ -180,14 +183,15 @@ sync.
 Internal conflicts
 ------------------
 
-When two threads try to make changes to the same objects, we have a
-write conflict. One thread is guaranteed to win; with conflict
-resolution, both may.
+When concurrent transactions attempt to modify the same objects, we
+get a write conflict in all but one (the objects may provide a
+conflict resolution method that can resolve some or all conflicts).
 
 .. note:: There is no built-in conflict resolution in the persistent base class.
 
-In a new thread, we check out the root object, make changes to it,
-then wait for a semaphore before we commit.
+In this example, we start up a new thread and commit a change to the
+database. Meanwhile, the main thread tries the same and is expected to
+fail. We use a semaphore to control program flow.
 
 >>> from threading import Semaphore
 >>> flag = Semaphore()
@@ -203,49 +207,44 @@ then wait for a semaphore before we commit.
 
 >>> from threading import Thread
 >>> thread = Thread(target=run)
-
->>> flag.acquire()
+>>> flag.acquire(); thread.start()
 True
 
->>> thread.start()
-
-We do the same in the main thread.
+In the main thread we check out the same object and assign a different
+attribute value.
 
 >>> checkout(obj)
 >>> obj.name = 'Bill'
 
-Releasing the semaphore, the thread will attempt to commit the
-transaction.
+Releasing the semaphore, the thread will commit the transaction.
 
 >>> flag.release()
 >>> thread.join()
-
-The transaction was committed.
-
 >>> db.tx_count
 4
 
-Trying to commit the transaction in the main thread, we get a write
-conflict.
+We expect a write conflict as we attempt to commit the transaction in
+the main thread.
 
 >>> transaction.commit()
 Traceback (most recent call last):
  ...
 WriteConflictError...
 
-The commit failed; this has implications beyond the exception being
-raised. A transaction record was written to disk.
+A transaction record was written to disk. It carries a flag that tells
+the database to ignore the transaction.
 
 >>> db.tx_count
 5
 
-Checked out objects have been reverted to the state of the most recent
-transaction.
+When transactions fail, objects have their state updated to the most
+recent transaction. We expect the object state to reflect the commit
+that was made from the thread.
 
 >>> obj.name
 'Bob'
 
-We must abort the failed transaction explicitly.
+We abort the failed transaction to reset the transaction system.
 
 >>> transaction.abort()
 
