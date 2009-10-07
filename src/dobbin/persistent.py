@@ -24,7 +24,7 @@ def checkout(obj):
         d = obj.__dict__
         cls = make_persistent_local(obj.__class__)
         setattr(obj, '__class__', cls)
-        obj.__init__(d)
+        obj._p_init_(d)
 
     if obj._p_jar is None:
         sync(obj)
@@ -77,6 +77,11 @@ class Persistent(object):
     _p_serial = None
     _p_resolve_conflict = None
 
+    def __new__(cls, *args, **kwargs):
+        inst = object.__new__(cls)
+        checkout(inst)
+        return inst
+
     @property
     def _p_shared(self):
         return self.__dict__
@@ -106,8 +111,10 @@ class Persistent(object):
                 state[key] = value
 
 class Broken(Persistent):
-    def __init__(self, oid):
-        self.__dict__['_p_oid'] = oid
+    def __new__(cls, oid):
+        inst = object.__new__(cls)
+        inst.__dict__['_p_oid'] = oid
+        return inst
 
 class Local(Persistent):
     """Local persistent.
@@ -125,10 +132,6 @@ class Local(Persistent):
     _p_count = 0
     _p_local = None
     _p_shared = None
-
-    def __init__(self, shared):
-        shared['_p_local'] = _local(shared)
-        shared['_p_shared'] = shared
 
     @property
     def __dict__(self):
@@ -164,6 +167,10 @@ class Local(Persistent):
             return self._p_shared[key]
         except KeyError:
             raise AttributeError(key)
+
+    def _p_init_(self, shared):
+        shared['_p_local'] = _local(shared)
+        shared['_p_shared'] = shared
 
 class _local(threading.local):
     """Thread local which proxies a shared dictionary."""

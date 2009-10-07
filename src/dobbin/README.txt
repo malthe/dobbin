@@ -37,8 +37,8 @@ Since this is an empty database, there is no root object yet.
 >>> db.root is None
 True
 
-Checking out an object
-----------------------
+Persistent objects
+------------------
 
 Any persistent object can be elected as the database root
 object. Persistent objects must inherit from the ``Persistent``
@@ -49,39 +49,15 @@ resolution mechanisms are available to ease this requirement).
 >>> from dobbin.persistent import Persistent
 >>> obj = Persistent()
 
-Persistent objects are read-only by default; the state (dict) is
-shared between threads. It is not difficult to use or abuse this in
-general, but we do prevent setting attributes on objects in shared
-state to manifest this point.
-
->>> obj.name = "John"
-Traceback (most recent call last):
- ...
-RuntimeError: Can't set attribute in read-only mode.
-
-If we use the ``checkout`` method on the object, its state changes
-from read-only to thread-local.
-
->>> from dobbin.persistent import checkout
->>> checkout(obj)
-
-.. warning:: Applications must check out objects before changing their state.
-
-The ``checkout`` does not have a return value; this is because the
-object identity never actually changes. Instead the attribute accessor
-and mutator methods are used to provide a thread-local object
-state. This happens transparent to the user.
-
-After checking out the object, we can both read and write attributes.
+Persistent objects begin life in *local* state. In this state we can
+both read and write attributes. However, when we want to write to an
+object which has previously been persisted in the database, we must
+check it out explicitly using the ``checkout`` method. We will see how
+this works shortly.
 
 >>> obj.name = 'John'
 >>> obj.name
 'John'
-
-When an object is first checked out by some thread, a counter is set
-to keep track of how many threads have checked out the object. When it
-falls to zero (always on a transaction boundary), it's retracted to
-the previous shared state.
 
 Electing a database root
 ------------------------
@@ -108,17 +84,43 @@ have been written to the database (successful and failed).
 >>> db.tx_count
 1
 
-Transactions
-------------
+Checking out objects
+--------------------
 
-The transaction log always appends data; it will grow with every
-transaction.
+The object is now persisted in the database. This means that we must
+now check it out before we are allowed to write to it.
+
+>>> obj.name = "John"
+Traceback (most recent call last):
+ ...
+RuntimeError: Can't set attribute in read-only mode.
+
+We use the ``checkout`` method on the object to change its state to
+local.
+
+>>> from dobbin.persistent import checkout
+>>> checkout(obj)
+
+.. warning:: Applications must check out already persisted objects before changing their state.
+
+The ``checkout`` method does not have a return value; this is because
+the object identity never actually changes. Instead custom attribute
+accessor and mutator methods are used to provide a thread-local object
+state. This happens transparent to the user.
+
+After checking out the object, we can both read and write attributes.
 
 >>> checkout(obj)
 >>> obj.name = 'James'
+
+When an object is first checked out by some thread, a counter is set
+to keep track of how many threads have checked out the object. When it
+falls to zero (always on a transaction boundary), it's retracted to
+the previous shared state.
+
 >>> transaction.commit()
 
-Verify transaction count.
+This increases the transaction count by one.
 
 >>> db.tx_count
 2
@@ -339,7 +341,6 @@ and commit the transaction without adding it to the object graph, an
 exception is raised.
 
 >>> another = Persistent()
->>> checkout(another)
 >>> transaction.commit()
 Traceback (most recent call last):
  ...
@@ -497,7 +498,6 @@ methods.
 Check out objects and connect to object graph.
 
 >>> checkout(obj)
->>> checkout(pdict)
 >>> obj.pdict = pdict
 
 You can store any key/value combination that works with standard

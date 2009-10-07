@@ -7,7 +7,6 @@ class BaseTestCase(unittest.TestCase):
         from dobbin.database import Database
         self._tempfile = tempfile.NamedTemporaryFile()
         self.database = Database(self._tempfile.name)
-        transaction.begin()
 
     def tearDown(self):
         self._tempfile.close()

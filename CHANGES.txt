@@ -3,6 +3,9 @@ Changes
 
 In next release...
 
+- When a persistent object is first created, its state is local (even
+  as its ``__init__`` method, if defined by a subclass, is called).
+
 - Implemented method to create a snapshot of particular moment in an
   existing database.
 

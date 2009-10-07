@@ -8,7 +8,6 @@ class PersistentDictTestCase(BaseTestCase):
     def _get_root(self):
         assert self.database.root is None
         root = PersistentDict()
-        checkout(root)
         self.database.elect(root)
         return root
 
