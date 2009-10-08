@@ -8,7 +8,6 @@ from dobbin.exc import ReadConflictError
 from dobbin.exc import ConflictError
 from dobbin.persistent import retract
 from dobbin.persistent import Broken
-from dobbin.persistent import Local
 from dobbin.persistent import Persistent
 from dobbin.utils import make_timestamp
 
@@ -90,7 +89,7 @@ class Manager(object):
             raise TypeError(
                 "Can't add non-persistent object.")
 
-        if not isinstance(obj, Local):
+        if not obj._p_local:
             raise TypeError(
                 "Check out object before adding it to the database.")
 
@@ -249,7 +248,7 @@ class Manager(object):
                     obj = object.__new__(cls)
                     state['_p_oid'] = oid
                     mapping[oid] = obj
-                elif isinstance(obj, Local):
+                elif obj._p_local:
                     # if our version of the object is persistent-local
                     # then we have a write conflict; it may be
                     # resolved, if the object provides a conflict

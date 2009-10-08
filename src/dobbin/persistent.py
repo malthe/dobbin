@@ -21,7 +21,7 @@ def checkout(obj):
 
     # upgrade shared objects to local; note that it's not an error to
     # check out an already local object
-    if not isinstance(obj, Local):
+    if not obj._p_local:
         d = obj.__dict__
         cls = make_persistent_local(obj.__class__)
         setattr(obj, '__class__', cls)
@@ -38,7 +38,7 @@ def checkout(obj):
 def retract(obj):
     """Returns the object to shared state."""
 
-    if not isinstance(obj, Local):
+    if not obj._p_local:
         raise TypeError("Object is not local-persistent.")
 
     cls = undo_persistent_local(type(obj))
