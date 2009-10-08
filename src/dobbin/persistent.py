@@ -68,6 +68,7 @@ class Persistent(object):
     """
 
     _p_jar = None
+    _p_local = None
     _p_oid = None
     _p_serial = None
     _p_shared = property(operator.attrgetter("__dict__"))
@@ -101,7 +102,7 @@ class Persistent(object):
         for key, value in new_state.items():
             if value is DELETE:
                 del shared[key]
-            if value is IGNORE:
+            elif value is IGNORE:
                 continue
             else:
                 shared[key] = value
@@ -198,9 +199,26 @@ class PersistentDict(Persistent):
         if state is not None:
             self.__dict__.update(state)
 
+    def __contains__(self, key):
+        shared = self._p_shared
+        local = self.__dict__
+        _key = (key,)
+
+        if local is not shared:
+            value = local.get(_key, MARKER)
+            if value is DELETE:
+                return False
+            if value is not MARKER:
+                return True
+
+        if _key in shared:
+            return True
+
+        return False
+
     def __iter__(self):
         shared = self._p_shared
-        local = shared.get("_p_local")
+        local = self._p_local
 
         # if there's no thread-local dictionary, just iterate through
         # the shared dictionary
@@ -268,6 +286,16 @@ class PersistentDict(Persistent):
         local.clear()
         local[()] = True
 
+    def copy(self):
+        return dict(self.items())
+
+    @classmethod
+    def fromkeys(cls, iterable, value=None):
+        d = cls()
+        for key in iterable:
+            d[key] = value
+        return d
+
     def get(self, key, default=None):
         shared = self._p_shared
         local = self.__dict__
@@ -286,8 +314,56 @@ class PersistentDict(Persistent):
     def items(self):
         return [(key, self[key]) for key in self]
 
+    def iteritems(self):
+        return ((key, self[key]) for key in self)
+
+    def iterkeys(self):
+        return iter(self)
+
+    def itervalues(self):
+        return (self[key] for key in self)
+
     def keys(self):
         return [key for key in self]
+
+    def pop(self, key, default=MARKER):
+        shared = self._p_shared
+        local = self.__dict__
+        _key = (key,)
+
+        value = local.get(_key, MARKER)
+        if value not in (MARKER, DELETE):
+            if _key in shared:
+                local[_key] = DELETE
+            else:
+                del local[_key]
+            return value
+
+        value = shared.get(_key, MARKER)
+        if value is not MARKER:
+            local[_key] = DELETE
+            return value
+
+        if default is not MARKER:
+            return default
+
+        raise KeyError(key)
+
+    def popitem(self):
+        local = self.__dict__
+        for key in local:
+            if isinstance(key, tuple):
+                value = local.pop(key)
+                return key[0], value
+
+        shared = self._p_shared
+        for key in shared:
+            if isinstance(key, tuple):
+                value = shared[key]
+                local[key] = DELETE
+                return key[0], value
+
+        raise KeyError("Dictionary is empty.")
 
     def setdefault(self, key, default):
         value = self.get(key, MARKER)
@@ -295,6 +371,13 @@ class PersistentDict(Persistent):
             return value
         self[key] = default
         return default
+
+    def update(self, d):
+        for key, value in d.items():
+            self[key] = value
+
+    def values(self):
+        return [self[key] for key in self]
 
 class PersistentFile(threading.local):
     """Persistent file.

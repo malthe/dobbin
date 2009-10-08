@@ -68,6 +68,64 @@ class PersistentDictTestCase(BaseTestCase):
         self.assertEqual(d.get('bar'), 'foo')
         self.assertEqual(d.get('bar', 'boo'), 'foo')
 
+    def test_pop(self):
+        d = self._get_root()
+
+        # local
+        d['bar'] = 'foo'
+        self.assertEqual(d.pop('bar'), 'foo')
+        self.assertRaises(KeyError, d.pop, 'bar')
+        self.assertEqual(d.pop('bar', 'boo'), 'boo')
+
+        # shared
+        transaction.commit()
+        self.assertFalse('bar' in d)
+
+        # local
+        checkout(d)
+        d['bar'] = 'foo'
+
+        # shared
+        transaction.commit()
+
+        # local
+        checkout(d)
+        self.assertEqual(d.pop('bar'), 'foo')
+        self.assertFalse('bar' in d)
+
+        # shared
+        transaction.commit()
+        self.assertFalse('bar' in d)
+
+    def test_popitem(self):
+        d = self._get_root()
+
+        # local
+        d['bar'] = 'foo'
+        self.assertEqual(d.popitem(), ('bar', 'foo'))
+        self.assertRaises(KeyError, d.popitem)
+        self.assertEqual(d.pop('bar', 'boo'), 'boo')
+
+        # shared
+        transaction.commit()
+        self.assertFalse('bar' in d)
+
+        # local
+        checkout(d)
+        d['bar'] = 'foo'
+
+        # shared
+        transaction.commit()
+
+        # local
+        checkout(d)
+        self.assertEqual(d.popitem(), ('bar', 'foo'))
+        self.assertFalse('bar' in d)
+
+        # shared
+        transaction.commit()
+        self.assertFalse('bar' in d)
+
     def test_setdefault(self):
         d = self._get_root()
 
