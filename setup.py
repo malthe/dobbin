@@ -16,6 +16,10 @@ USAGE = open(os.path.join(here, 'src', 'dobbin', 'README.txt')).read()
 
 version = sys.version_info[:3]
 
+install_requires = [
+    "transaction",
+    ]
+
 setup(
     name="dobbin",
     version=__version__,
@@ -31,14 +35,13 @@ setup(
     keywords="object database persistence",
     author="Malthe Borch",
     author_email="mborch@gmail.com",
-    install_requires=[
-        "transaction",
-        ],
+    install_requires=install_requires,
     license='BSD',
     packages=find_packages('src'),
     package_dir = {'': 'src'},
     include_package_data=True,
     zip_safe=False,
     test_suite="dobbin.tests",
+    tests_require = install_requires + ['ZODB3'],
     )
 
