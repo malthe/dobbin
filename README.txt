@@ -1,8 +1,8 @@
 Overview
 ========
 
-Dobbin is a transactional object database for Python. It's a fast and
-convenient way to persist Python objects on disk.
+Dobbin is a transactional object database for Python (2.6+). It's a
+fast and convenient way to persist Python objects on disk.
 
 Key features:
 
