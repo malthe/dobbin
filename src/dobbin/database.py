@@ -5,7 +5,6 @@ import re
 import shutil
 import threading
 import cPickle as pickle
-import pickle
 from cStringIO import StringIO
 
 from fcntl import flock
@@ -41,7 +40,7 @@ class Database(Manager):
 
         # pickle writer
         self._buffer = StringIO()
-        self._pickler = pickle.Pickler(self._buffer)
+        self._pickler = pickle.Pickler(self._buffer, pickle.HIGHEST_PROTOCOL)
         self._offsets = {}
 
         super(Database, self).__init__()
