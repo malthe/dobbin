@@ -1,7 +1,8 @@
 Changes
 =======
 
-In next release...
+0.2 (2009-10-22)
+----------------
 
 - Subclasses may now override existing methods (e.g. ``__setattr__``)
   and use ``super`` to get at the overriden method.
