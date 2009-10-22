@@ -1,12 +1,11 @@
 from dobbin.tests.base import BaseTestCase
-from dobbin.persistent import PersistentDict
-from dobbin.persistent import checkout
 
 import transaction
 
 class PersistentDictTestCase(BaseTestCase):
     def _get_root(self):
         assert self.database.root is None
+        from dobbin.persistent import PersistentDict
         root = PersistentDict()
         self.database.elect(root)
         return root
@@ -23,6 +22,7 @@ class PersistentDictTestCase(BaseTestCase):
         self.assertEqual(d['foo'], 'bar')
 
         # local
+        from dobbin.persistent import checkout
         checkout(d)
         d['bar'] = 'boo'
         self.assertEqual(d['foo'], 'bar')
@@ -39,6 +39,8 @@ class PersistentDictTestCase(BaseTestCase):
         # local
         d['bar'] = 'foo'
         transaction.commit()
+
+        from dobbin.persistent import checkout
         checkout(d)
         d.clear()
         self.assertEqual(d.get('bar'), None)
@@ -82,6 +84,7 @@ class PersistentDictTestCase(BaseTestCase):
         self.assertFalse('bar' in d)
 
         # local
+        from dobbin.persistent import checkout
         checkout(d)
         d['bar'] = 'foo'
 
@@ -111,6 +114,7 @@ class PersistentDictTestCase(BaseTestCase):
         self.assertFalse('bar' in d)
 
         # local
+        from dobbin.persistent import checkout
         checkout(d)
         d['bar'] = 'foo'
 
@@ -132,6 +136,17 @@ class PersistentDictTestCase(BaseTestCase):
         d.setdefault('bar', 'boo')
         self.assertEqual(d['bar'], 'boo')
 
+    def test_update(self):
+        d = self._get_root()
+
+        # local
+        d.update({'bar': 'boo'})
+        self.assertEqual(d['bar'], 'boo')
+
+        # shared
+        transaction.commit()
+        self.assertEqual(d['bar'], 'boo')
+
     def test_iteration(self):
         d = self._get_root()
 
@@ -148,6 +163,7 @@ class PersistentDictTestCase(BaseTestCase):
         self.assertEqual(tuple(d), ('foo',))
 
         # local
+        from dobbin.persistent import checkout
         checkout(d)
         d['bar'] = 'boo'
         self.assertEqual(sorted(d.keys()), ['bar', 'foo'])
@@ -159,3 +175,11 @@ class PersistentDictTestCase(BaseTestCase):
         self.assertEqual(sorted(d.keys()), ['bar', 'foo'])
         self.assertEqual(sorted(d.items()), [('bar', 'boo'), ('foo', 'bar')])
         self.assertEqual(tuple(sorted(d)), ('bar', 'foo',))
+
+    def test_type(self):
+        d = self._get_root()
+        self.assertTrue(isinstance(d, dict))
+
+        # shared
+        transaction.commit()
+        self.assertTrue(isinstance(d, dict))

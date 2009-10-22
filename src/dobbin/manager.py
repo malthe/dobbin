@@ -1,4 +1,3 @@
-import logging
 import threading
 import transaction
 
@@ -6,16 +5,14 @@ from dobbin.exc import InvalidObjectReference
 from dobbin.exc import WriteConflictError
 from dobbin.exc import ReadConflictError
 from dobbin.exc import ConflictError
-from dobbin.persistent import retract
+from dobbin.persistent import checkout
 from dobbin.persistent import Broken
 from dobbin.persistent import Persistent
-from dobbin.utils import make_timestamp
+from dobbin.persistent import sync
 
 ROOT_OID = 0
 
-log = logging.getLogger("dobbin.manager")
-
-marker = object()
+setattr = object.__setattr__
 
 class Manager(object):
     """Transactional object manager.
@@ -24,6 +21,7 @@ class Manager(object):
 
     Subclasses must implement:
 
+    -new_oid(obj)
     -read(jar, timestamp)
     -write(obj)
 
@@ -70,12 +68,12 @@ class Manager(object):
             transaction.manager.registerSynch(self)
             tx = transaction.manager.get()
             self.newTransaction(tx)
-        return self.get(ROOT_OID, None)
+        return self.get(ROOT_OID)
 
     def abort(self, transaction):
         """Abort changes."""
 
-        self._revert(self._thread.registered)
+        self._revert(self._thread.modified)
         self._revert(self._thread.committed)
 
     def add(self, obj):
@@ -85,22 +83,14 @@ class Manager(object):
         root object graph.
         """
 
-        if not isinstance(obj, Persistent):
-            raise TypeError(
-                "Can't add non-persistent object.")
-
-        if not obj._p_local:
-            raise TypeError(
-                "Check out object before adding it to the database.")
-
         if obj._p_jar is None:
             obj._p_jar = self
-            self._register(obj)
         elif obj._p_jar is self:
-            raise RuntimeError(
-                "Object already added to the database.")
+            raise RuntimeError("Object already added to the database.")
         else:
             raise InvalidObjectReference(obj)
+
+        checkout(obj)
 
     def afterCompletion(self, transaction):
         pass
@@ -112,14 +102,14 @@ class Manager(object):
         """Commit changes to disk."""
 
         committed = self._thread.committed
-        registered = self._thread.registered
+        modified = self._thread.modified
         timestamp = self._thread.timestamp
 
         # update transaction timestamp
-        self._thread.timestamp = make_timestamp()
+        self._thread.timestamp = sync.timestamp
 
-        while registered:
-            for obj in tuple(registered):
+        while modified:
+            for obj in tuple(modified):
                 # assert that object belongs to this database
                 if obj._p_jar is not self:
                     raise InvalidObjectReference(obj)
@@ -127,19 +117,29 @@ class Manager(object):
                 # if the object has been updated since we begun our
                 # transaction, it's a write-conflict.
                 if obj._p_serial > timestamp:
-                    raise WriteConflictError(obj)
+                    try:
+                        state = self._resolve(obj)
+                    except ConflictError:
+                        raise WriteConflictError(obj)
+                else:
+                    state = obj.__getstate__()
 
-                self.write(obj)
-                committed.add(obj)
-                registered.remove(obj)
+                # make sure the object has an oid
+                oid = obj._p_oid
+                if oid is None:
+                    oid = self.new_oid(obj)
+
+                self.write(oid, obj._p_class, state)
+                committed.append((obj, state))
+                modified.remove(obj)
 
         # update database timestamp
         self.tx_timestamp = self._thread.timestamp
 
-    def get(self, oid, default=marker):
-        obj = self._oid2obj.get(oid, default)
-        if obj is marker:
-            obj = Broken(oid)
+    def get(self, oid, cls=None):
+        obj = self._oid2obj.get(oid)
+        if obj is None and cls is not None:
+            obj = Broken(oid, cls)
             self._oid2obj[oid] = obj
         return obj
 
@@ -165,7 +165,7 @@ class Manager(object):
         self._sync()
 
     def save(self, obj):
-        self._register(obj)
+        return self._register(obj)
 
     def snapshot(self, database, timestamp=None):
         """Return database snapshot."""
@@ -211,27 +211,30 @@ class Manager(object):
     def tpc_finish(self, transaction):
         """Indicate confirmation that the transaction is done."""
 
+        state = self._thread
         oid2obj = self._oid2obj
-        for obj in self._thread.committed:
+        timestamp = self._thread.timestamp
+        committed = self._thread.committed
+
+        while committed:
+            obj, state = committed.pop()
             oid2obj[obj._p_oid] = obj
-
-            state = obj.__getstate__()
             obj.__setstate__(state)
-            obj._p_serial = self._thread.timestamp
-
-            # unregister object with this transaction
-            self._unregister(obj)
+            obj._p_serial = timestamp
 
         self._tpc_cleanup()
 
-    def _maybe_share_object(self, obj):
-        if obj._p_count == 0:
-            retract(obj)
-            return True
-        return False
+    def _register(self, obj):
+        if self._thread.needs_to_join:
+            transaction.get().join(self)
+            self._thread.needs_to_join = False
+            self._thread.timestamp = sync.timestamp
+
+        modified = self._thread.modified
+        if obj not in modified:
+            modified.add(obj)
 
     def _read(self, jar, start=None, end=None):
-        mapping = jar._oid2obj
         conflicts = set()
 
         for record, objects in self.read(jar, start):
@@ -240,35 +243,26 @@ class Manager(object):
                 break
 
             for oid, cls, state in objects:
-                obj = mapping.get(oid)
+                obj = jar.get(oid, cls)
 
-                # if the object does not exist in the database, we create
-                # it using the ``__new__`` constructor
-                if obj is None:
-                    obj = object.__new__(cls)
-                    state['_p_oid'] = oid
-                    mapping[oid] = obj
-                elif obj._p_local:
+                if obj in self._thread.modified:
                     # if our version of the object is persistent-local
                     # then we have a write conflict; it may be
                     # resolved, if the object provides a conflict
                     # resolution method; it gets called with three
                     # arguments: (old_state, saved_state, new_state).
                     try:
-                        if obj._p_resolve_conflict is None:
-                            raise ReadConflictError(obj)
-                        state = obj._p_resolve_conflict(
-                            obj.__getstate__(), obj.__dict__, state)
+                        state = self._resolve(obj, new_state=state)
                     except ConflictError:
                         conflicts.add(obj)
                 else:
-                    object.__setattr__(obj, "__class__", cls)
+                    setattr(obj, "__class__", cls)
 
                 # update timestamp
-                state['_p_serial'] = timestamp
+                setattr(obj, '_p_serial', timestamp)
 
                 # associate with this database
-                state['_p_jar'] = jar
+                setattr(obj, '_p_jar', jar)
 
                 # set shared state
                 obj.__setstate__(state)
@@ -278,23 +272,22 @@ class Manager(object):
         if conflicts:
             raise ReadConflictError(*conflicts)
 
-    def _register(self, obj):
-        if self._thread.needs_to_join:
-            transaction.get().join(self)
-            self._thread.needs_to_join = False
-            self._thread.timestamp = make_timestamp()
-
-        # if the object has not already been registered with this
-        # thread we do so and update the thread-use count
-        registered = self._thread.registered
-        if obj not in registered:
-            registered.add(obj)
-            obj._p_count += 1
+    def _resolve(self, obj, new_state=None):
+        self.lock_acquire()
+        try:
+            if obj._p_resolve_conflict is None:
+                raise ConflictError(obj)
+            if new_state is None:
+                new_state = obj.__getstate__()
+            return obj._p_resolve_conflict(
+                obj.__oldstate__(), super(type(obj), obj).__getstate__(), new_state)
+        finally:
+            self.lock_release()
 
     def _revert(self, objects):
         while objects:
             obj = objects.pop()
-            self._unregister(obj)
+            obj.__setstate__()
 
     def _sync(self):
         for record in self._read(self, self.tx_timestamp):
@@ -305,16 +298,8 @@ class Manager(object):
         """Performs cleanup operations to support ``tpc_finish`` and
         ``tpc_abort``."""
 
-        self._thread.registered.clear()
-        self._thread.committed.clear()
         self._thread.needs_to_join = True
         self.tx_count += 1
-
-    def _unregister(self, obj):
-        obj._p_count -= 1
-        if self._maybe_share_object(obj):
-            return True
-        obj.__dict__.clear()
 
 class ThreadState(threading.local):
     """Thread-local database state."""
@@ -323,5 +308,5 @@ class ThreadState(threading.local):
     timestamp = None
 
     def __init__(self):
-        self.registered = set()
-        self.committed = set()
+        self.modified = set()
+        self.committed = []

@@ -4,7 +4,8 @@ import tempfile
 import transaction
 
 OPTIONFLAGS = (doctest.ELLIPSIS |
-               doctest.NORMALIZE_WHITESPACE)
+               doctest.NORMALIZE_WHITESPACE |
+               doctest.REPORT_ONLY_FIRST_FAILURE)
 
 class DoctestCase(unittest.TestCase):
     def __new__(self, test):
@@ -23,4 +24,15 @@ class DoctestCase(unittest.TestCase):
             'README.txt',
             optionflags=OPTIONFLAGS,
             globs=globs,
+            setUp=cls.setUp,
+            tearDown=cls.tearDown,
             package="dobbin")
+
+    @staticmethod
+    def setUp(test):
+        transaction.abort()
+
+    @staticmethod
+    def tearDown(test):
+        tx = transaction.get()
+        transaction.manager.free(tx)

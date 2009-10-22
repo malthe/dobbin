@@ -3,15 +3,17 @@ Changes
 
 In next release...
 
-- When a persistent object is first created, its state is local (even
-  as its ``__init__`` method, if defined by a subclass, is called).
+- Subclasses may now override existing methods (e.g. ``__setattr__``)
+  and use ``super`` to get at the overriden method.
 
-- Implemented method to create a snapshot of particular moment in an
-  existing database.
+- Transactions now see data in isolation.
 
-- Added ``PersistentDict`` class. Due to changes in the ``Persistent``
-  superclass, this dictionary is little more than sugar coating to
-  implement the standard dictionary interface.
+- When a persistent object is first created, its state is immediately
+  local. This allows an ``__init__`` method to initialize the object.
+
+- Added method to create a snapshot in time of an existing database.
+
+- Added ``PersistentDict`` class.
 
 - The ``Persistent`` class is now persisted as changesets rather than
   complete object state.

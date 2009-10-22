@@ -93,7 +93,7 @@ now check it out before we are allowed to write to it.
 >>> obj.name = "John"
 Traceback (most recent call last):
  ...
-RuntimeError: Can't set attribute in read-only mode.
+TypeError: Can't set attribute on shared object.
 
 We use the ``checkout`` method on the object to change its state to
 local.
@@ -110,7 +110,6 @@ state. This happens transparent to the user.
 
 After checking out the object, we can both read and write attributes.
 
->>> checkout(obj)
 >>> obj.name = 'James'
 
 When an object is first checked out by some thread, a counter is set
@@ -180,156 +179,88 @@ Applications must begin a new transaction to stay in sync.
 >>> new_obj.name
 'Jane'
 
-Internal conflicts
-------------------
+Conflicts
+---------
 
 When concurrent transactions attempt to modify the same objects, we
-get a write conflict in all but one (the objects may provide a
-conflict resolution method that can resolve some or all conflicts).
+get a write conflict in all but one (first to get the commit-lock wins
+the transaction).
+
+Objects can provide conflict resolution capabilities such that two
+concurrent transactions may update the same object.
 
 .. note:: There is no built-in conflict resolution in the persistent base class.
 
-In this example, we start up a new thread and commit a change to the
-database. Meanwhile, the main thread tries the same and is expected to
-fail. We use a semaphore to control program flow.
+As an example, let's create a counter object; it could represent a
+counter which keeps track of visitors on a website. To provide
+conflict resolution for instances of this class, we implement a
+``_p_resolve_conflict`` method.
+
+>>> class Counter(Persistent):
+...     def __init__(self):
+...         self.count = 0
+...
+...     def hit(self):
+...         self.count += 1
+...
+...     @staticmethod
+...     def _p_resolve_conflict(old_state, saved_state, new_state):
+...         saved_diff = saved_state['count'] - old_state['count']
+...         new_diff = new_state['count']- old_state['count']
+...         return {'count': old_state['count'] + saved_diff + new_diff}
+
+As a doctest technicality, we set the class on the builtin module.
+
+>>> import __builtin__; __builtin__.Counter = Counter
+
+Next we instantiate a counter instance, then add it to object graph.
+
+>>> counter = Counter()
+>>> checkout(obj)
+>>> obj.counter = counter
+>>> transaction.commit()
+
+To demonstrate the conflict resolution functionality of this class, we
+update the counter in two concurrent transactions. We will attempt one
+of the transactions in a separate thread.
 
 >>> from threading import Semaphore
 >>> flag = Semaphore()
+>>> flag.acquire()
+True
 
 >>> def run():
-...     obj = db.root
-...     assert obj is not None
-...     checkout(obj)
-...     obj.name = 'Bob'
+...     counter = db.root.counter
+...     assert counter is not None
+...     checkout(counter)
+...     counter.hit()
 ...     flag.acquire()
-...     transaction.commit()
-...     flag.release()
+...     try: transaction.commit()
+...     finally: flag.release()
 
 >>> from threading import Thread
 >>> thread = Thread(target=run)
->>> flag.acquire(); thread.start()
-True
+>>> thread.start()
 
 In the main thread we check out the same object and assign a different
 attribute value.
 
->>> checkout(obj)
->>> obj.name = 'Bill'
+>>> checkout(counter)
+>>> counter.count
+0
+>>> counter.hit()
 
 Releasing the semaphore, the thread will commit the transaction.
 
 >>> flag.release()
 >>> thread.join()
->>> db.tx_count
-4
 
-We expect a write conflict as we attempt to commit the transaction in
-the main thread.
+As we commit the transaction running in the main thread, we expect the
+counter to have been increased twice.
 
 >>> transaction.commit()
-Traceback (most recent call last):
- ...
-WriteConflictError...
-
-A transaction record was written to disk. It carries a flag that tells
-the database to ignore the transaction.
-
->>> db.tx_count
-5
-
-When transactions fail, objects have their state updated to the most
-recent transaction. We expect the object state to reflect the commit
-that was made from the thread.
-
->>> obj.name
-'Bob'
-
-We abort the failed transaction to reset the transaction system.
-
->>> transaction.abort()
-
-When all threads are done with an object they've previously checked
-out, its state is retracted to shared. To verify this, we try and set
-an attribute on it.
-
->>> obj.name = "John"
-Traceback (most recent call last):
- ...
-RuntimeError: Can't set attribute in read-only mode.
-
-External conflicts
-------------------
-
-Two threads each belonging to different processes can conflict too,
-obviously. We can simulate two processes by again opening a new
-thread, but this time use the second database instance.
-
-We begin a new transaction such that both database instances are
-up-to-date.
-
->>> tx = transaction.begin()
-
-Confirm that the databases are indeed up-to-date (and have registered
-the same number of transactions).
-
->>> db.tx_count == new_db.tx_count
-True
-
->>> def run():
-...     new_obj = new_db.root
-...     assert new_obj is not None
-...     checkout(new_obj)
-...     new_obj.name = 'Ian'
-...     flag.acquire()
-...     transaction.commit()
-...     flag.release()
-
->>> thread = Thread(target=run)
-
->>> flag.acquire()
-True
-
->>> thread.start()
-
-We do the same in the main thread.
-
->>> checkout(obj)
->>> obj.name = 'Ilya'
-
-Releasing the semaphore, the thread will attempt to commit the
-transaction.
-
->>> flag.release()
->>> thread.join()
-
-The transaction was committed.
-
->>> new_db.tx_count
-6
-
-If we attempt a commit in the main thread, a read conflict is raised;
-the reason why it's not a write conflict is that the database first
-catches up on new transactions.
-
->>> transaction.commit()
-Traceback (most recent call last):
- ...
-ReadConflictError...
-
-Again, the failed transaction is recorded.
-
->>> db.tx_count
-7
-
-The state of the object reflects the transaction which was committed
-in the thread.
-
->>> obj.name
-'Ian'
-
-We clean up from the failed transaction.
-
->>> transaction.abort()
+>>> counter.count
+2
 
 More objects
 ------------
@@ -343,7 +274,7 @@ exception is raised.
 >>> transaction.commit()
 Traceback (most recent call last):
  ...
-ObjectGraphError: <dobbin.persistent.Persistent object at ...> not connected to graph.
+ObjectGraphError: <dobbin.persistent.LocalPersistent object at ...> not connected to graph.
 
 We abort the transaction and try again, this time connecting the
 object using an attribute reference.
@@ -360,7 +291,7 @@ in general predictable; they are assigned by the database on commit).
 
 >>> transaction.commit()
 >>> len(db)
-2
+3
 
 >>> another._p_oid is not None
 True
@@ -539,7 +470,7 @@ target database.
 The snapshot contains three objects.
 
 >>> len(tmp_db)
-3
+4
 
 They were persisted in a single transaction.
 
@@ -550,11 +481,19 @@ We can confirm that the state indeed matches that of the current
 database.
 
 >>> tmp_obj = tmp_db.root
->>> tmp_obj.name
-'Ian'
 
+The object graph is equal to that of the original database.
+
+>>> tmp_obj.name
+'Jane'
 >>> tmp_obj.another.name
 'Karla'
+>>> tmp_obj.pdict['obj'] is tmp_obj
+True
+>>> tmp_obj.pdict.name
+'Bob'
+
+Binary streams are included in the snapshot, too.
 
 >>> "".join(tmp_obj.file)
 'abc'

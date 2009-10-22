@@ -5,6 +5,7 @@ import re
 import shutil
 import threading
 import cPickle as pickle
+import pickle
 from cStringIO import StringIO
 
 from fcntl import flock
@@ -13,11 +14,8 @@ from fcntl import LOCK_UN
 from fcntl import LOCK_NB
 
 from dobbin.exc import IntegrityError
-from dobbin.persistent import Local
 from dobbin.persistent import Persistent
 from dobbin.persistent import PersistentFile
-from dobbin.persistent import undo_persistent_local
-from dobbin.utils import make_timestamp
 from dobbin.manager import Manager
 
 # transaction log segment types
@@ -25,7 +23,7 @@ LOG_VERSION = 0
 LOG_RECORD = 1
 LOG_STREAM = 2
 
-re_id = re.compile(r'(?P<protocol>[a-z]+)://(?P<token>[0-9:]+)')
+re_id = re.compile(r'(?P<protocol>[a-z]+)://(?P<token>.+)')
 logger = logging.getLogger('dobbin.database')
 
 class Database(Manager):
@@ -47,6 +45,14 @@ class Database(Manager):
         self._offsets = {}
 
         super(Database, self).__init__()
+
+    def __copy__(self):
+        return type(self)(self._path)
+
+    def new_oid(self, obj):
+        oid = obj._p_oid = self._oid + 1
+        self._oid = oid
+        return oid
 
     def read(self, jar, timestamp):
         """Read transactions newer than ``timestamp``."""
@@ -75,8 +81,8 @@ class Database(Manager):
             token = match.group('token')
 
             if protocol == 'oid':
-                oid = int(token)
-                return jar.get(oid)
+                oid, cls = pickle.loads(token.decode('base64'))
+                return jar.get(oid, cls)
 
             if protocol == 'file':
                 offset, length = map(int, token.split(':'))
@@ -106,6 +112,59 @@ class Database(Manager):
         if entries:
             raise IntegrityError(
                 "Transaction record not found for %d entries." % len(entries))
+
+    def write(self, oid, cls, state):
+        def persistent_id(obj):
+            """This closure provides persistent identifier tokens for
+            persistent objects and files.
+            """
+
+            if isinstance(obj, Persistent):
+                if obj._p_jar is None:
+                    self.add(obj)
+
+                oid = obj._p_oid
+                if oid is None:
+                    oid = self.new_oid(obj)
+
+                return "oid://%s" % pickle.dumps((oid, obj._p_class)).encode('base64').rstrip()
+
+            if isinstance(obj, PersistentStream):
+                return "file://%d:%d" % (obj.offset, obj.length)
+
+            if isinstance(obj, PersistentFile):
+                # compute file length
+                offset = obj.tell()
+                obj.seek(0, os.SEEK_END)
+                length = obj.tell() - offset
+                obj.seek(offset)
+
+                # write transaction log segment
+                offset = self._write_unbuffered(LOG_STREAM, (obj.name, length))
+                self._write_stream(obj, length)
+
+                # switch identity to transaction stream
+                obj.__dict__.clear()
+                obj.__class__ = PersistentStream
+                obj.__init__(self._opener, offset, length)
+
+                return "file://%d:%d" % (offset, length)
+
+            if isinstance(obj, file):
+                raise TypeError(
+                    "Can't persist files; use the ``PersistentFile`` wrapper.")
+
+        self._pickler.persistent_id = persistent_id
+
+        # pickle object state; note that the pickler instance is set
+        # up to write to a buffer in memory --- the reason being that
+        # pickling may fail, which is likely to result in integrity
+        # errors if we write directly to disk (another critical
+        # benefit is that the ``persistent_id`` method is free to
+        # write data to disk, circumventing the pickle buffer; this is
+        # used to write file streams in parallel with the pickle
+        # operation); all in all: brittle machinery.
+        self._write(LOG_VERSION, (oid, cls, state))
 
     def tpc_abort(self, transaction):
         self.lock_acquire()
@@ -199,69 +258,6 @@ class Database(Manager):
 
         super(Database, self).tpc_finish(transaction)
 
-    def write(self, obj):
-        jar = obj._p_jar
-        oid = obj._p_oid
-        state = obj.__getstate__()
-        cls = undo_persistent_local(obj.__class__)
-
-        if oid is None:
-            oid = self._new_oid(obj)
-
-        deferred = []
-
-        def persistent_id(obj):
-            """This closure provides persistent identifier tokens for
-            persistent objects and files.
-            """
-
-            if isinstance(obj, Persistent):
-                if obj._p_jar is None:
-                    jar.add(obj)
-
-                oid = obj._p_oid
-                if oid is None:
-                    oid = self._new_oid(obj)
-
-                return "oid://%d" % oid
-
-            if isinstance(obj, PersistentStream):
-                return "file://%d:%d" % (obj.offset, obj.length)
-
-            if isinstance(obj, PersistentFile):
-                # compute file length
-                offset = obj.tell()
-                obj.seek(0, os.SEEK_END)
-                length = obj.tell() - offset
-                obj.seek(offset)
-
-                # write transaction log segment
-                offset = self._write_unbuffered(LOG_STREAM, (obj.name, length))
-                self._write_stream(obj, length)
-
-                # switch identity to transaction stream
-                obj.__dict__.clear()
-                obj.__class__ = PersistentStream
-                obj.__init__(self._opener, offset, length)
-
-                return "file://%d:%d" % (offset, length)
-
-            if isinstance(obj, file):
-                raise TypeError(
-                    "Can't persist files; use the ``PersistentFile`` wrapper.")
-
-        self._pickler.persistent_id = persistent_id
-
-        # pickle object state; note that the pickler instance is set
-        # up to write to a buffer in memory --- the reason being that
-        # pickling may fail, which is likely to result in integrity
-        # errors if we write directly to disk (another critical
-        # benefit is that the ``persistent_id`` method is free to
-        # write data to disk, circumventing the pickle buffer; this is
-        # used to write file streams in parallel with the pickle
-        # operation); all in all: brittle machinery.
-        self._write(LOG_VERSION, (oid, cls, state))
-
     def _flush(self, offset=0):
         stream = self._buffer
 
@@ -299,17 +295,12 @@ class Database(Manager):
     def _opener(self):
         return file(self._path, 'rb')
 
-    def _new_oid(self, obj):
-        oid = obj._p_oid = self._oid + 1
-        self._oid = oid
-        return oid
-
     def _write(self, segment_type, data):
         try:
             self._pickler.dump((segment_type, data))
-        except:
-            logger.critical("Could not pickle data: %s (type %d)." % (
-                repr(data), segment_type))
+        except Exception, e:
+            logger.critical("Could not pickle data: %s (type %d).\n%s" % (
+                repr(data), segment_type, str(e)))
             self._flush()
             raise
 

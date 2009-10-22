@@ -41,25 +41,39 @@ these assumptions.
 Architecture
 ------------
 
-Dobbin does not try to limit its memory usage, in any way. The
-assumption that lead to this decision is that it's faster to page in
-CPython-objects from swap than read pickles from the database file and
-restore the objects which adds an allocation overhead besides the
-expensive unpickle operation.
+Dobbin is designed to support multi-threaded applications without
+significant memory overhead. It does this by keeping objects in a
+shared (between all threads) state when possible, and only as little
+thread-local state as is required by the concurrency model.
 
-Persistent objects are kept in a *shared* state when possible, meaning
-that data is shared between threads. The exception is when threads
-want to change the state as part of a transaction. Objects are then
-*checked out* (an explicit function call) which puts the object in a
-*local* state; objects in this state have a local deep-copy of the
-shared state, which they are free to change.
+It does not, however, manage memory consumption in terms of data on
+disk versus data in RAM. On startup, the entire database is loaded
+into virtual memory and to this extent some data may be loaded
+directly into the system page file. The operating system's memory
+manager is expected to keep much-used objects readily available and
+lesser-used objects available on request.
 
-Another objective was to get rid of the requirement of a master node
-in order for several processes to share a single database. Instead we
-use native file-system locking and pull-based transaction
-propagation. There is no inherent network-support; it may be possible
-to use a virtualized file system (this is on a strictly theoretical
-basis; it has not been attempted).
+One assumption that lead to this decision is that the virtual memory
+manager is able to write CPython-objects to disk while a Python-based
+memory manager will need to serialize objects first. It is difficult
+to implement a memory manager in Python and the complexity is certain
+to cause a logic overhead which will hurt performance.
 
-The database relies on the ``transaction`` package to support
-two-phase commits.
+MVCC
+----
+
+Dobbin provides a MVCC concurrency model.
+
+A transaction (tx1) begins; an object is checked out. Meanwhile a
+second transaction (tx2) begins.
+
+When tx1 is committed, the shared state of the object is updated, too,
+although first tx2 gets assigned local changes to the object in which
+said changes are reversed.
+
+Such "reversing" changesets are applied for all active threads (which
+have an active transaction that predates the commit).
+
+If a third transaction is begun (again in a separate thread), it
+simply uses the shared state of the object (having no local state of
+its own).
