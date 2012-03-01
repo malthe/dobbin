@@ -54,7 +54,7 @@ class Benchmark(BaseTestCase):
         """Commit (single): Dobbin"""
 
         from dobbin.persistent import Persistent
-        items = [Persistent() for i in range(10000)]
+        items = [Persistent() for i in range(1000)]
         root = self._get_root(Persistent)
         root.items = items
         transaction.commit()
