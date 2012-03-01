@@ -3,7 +3,7 @@ Changes
 
 In next release...
 
-- Use ``cPickle`` module (in highest available protocol).
+- Use C-optimized pickle module when available.
 
 0.2 (2009-10-22)
 ----------------
