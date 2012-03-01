@@ -39,6 +39,6 @@ setup(
     include_package_data=True,
     zip_safe=False,
     test_suite="dobbin.tests",
-    tests_require = install_requires + ['ZODB3'],
+    tests_require = install_requires,
     )
 

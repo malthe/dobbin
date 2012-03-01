@@ -18,19 +18,8 @@ def timing(func, *args, **kwargs):
         t2 = time()
     return i, float(t2-t1)/i
 
+
 class Benchmark(BaseTestCase):
-    def setUp(self):
-        super(Benchmark, self).setUp()
-        self._zodbfile = tempfile.NamedTemporaryFile()
-        from ZODB import FileStorage, DB
-        storage = FileStorage.FileStorage(self._zodbfile.name)
-        db = DB(storage)
-        self._zodb = db
-
-    def tearDown(self):
-        self._zodbfile.close()
-        super(Benchmark, self).tearDown()
-
     def _get_root(self, cls):
         assert self.database.root is None
         root = cls()
@@ -59,34 +48,6 @@ class Benchmark(BaseTestCase):
 
         i, t = timing(benchmark)
         size = os.path.getsize(self._tempfile.name) - size
-        report_stat("%0.1f ms (%d kb)" % ((t*1000), size/1024/i))
-
-    def test_commit_many_zodb(self):
-        """Commit (many): ZODB"""
-
-        from persistent import Persistent
-
-        class Item(Persistent):
-            pass
-
-        from dobbin.tests import test_benchmark as module
-        module.Item = Item
-
-        size = os.path.getsize(self._zodbfile.name)
-
-        def benchmark():
-            transaction.begin()
-            items = [Item() for i in range(1000)]
-            conn = self._zodb.open()
-            root = conn.root()
-            for item in items:
-                item.name = 'Bob'
-            root.items = items
-            transaction.commit()
-            conn.close()
-
-        i, t = timing(benchmark)
-        size = os.path.getsize(self._zodbfile.name) - size
         report_stat("%0.1f ms (%d kb)" % ((t*1000), size/1024/i))
 
     def test_commit_single_dobbin(self):
@@ -119,47 +80,6 @@ class Benchmark(BaseTestCase):
         report_stat("%0.1f ms (%d bytes)" % ((t*1000), size/i))
         transaction.abort()
 
-    def test_commit_single_zodb(self):
-        """Commit (single): ZODB"""
-
-        from persistent import Persistent
-
-        class Item(Persistent):
-            pass
-
-        from dobbin.tests import test_benchmark as module
-        module.Item = Item
-
-        items = [Item() for i in range(10000)]
-        conn = self._zodb.open()
-        root = conn.root()
-        root.items = items
-        transaction.commit()
-        conn.close()
-
-        added = []
-
-        size = os.path.getsize(self._zodbfile.name)
-
-        def benchmark():
-            transaction.begin()
-            i = len(added)
-            conn = self._zodb.open()
-            root = conn.root()
-            item = root.items[i]
-            item.name1 = 'Bob'
-            item.name2 = 'Bill'
-            item.ref = item
-            transaction.commit()
-            added.append(i)
-            conn.close()
-
-        i, t = timing(benchmark)
-
-        size = os.path.getsize(self._zodbfile.name) - size
-        report_stat("%0.1f ms (%d bytes)" % ((t*1000), size/i))
-        transaction.abort()
-
     def test_commit_dict_update_dobbin(self):
         """Commit (update dict): Dobbin"""
 
@@ -179,26 +99,4 @@ class Benchmark(BaseTestCase):
 
         i, t = timing(benchmark)
         size = os.path.getsize(self._tempfile.name) - size
-        report_stat("%0.1f ms (%d bytes)" % ((t*1000), size/i))
-
-    def test_commit_dict_update_zodb(self):
-        """Commit (update dict): ZODB"""
-
-        conn = self._zodb.open()
-        root = conn.root()
-        transaction.commit()
-        conn.close()
-
-        size = os.path.getsize(self._zodbfile.name)
-
-        def benchmark():
-            conn = self._zodb.open()
-            root = conn.root()
-            transaction.begin()
-            root[None] = "abc"
-            transaction.commit()
-            conn.close()
-
-        i, t = timing(benchmark)
-        size = os.path.getsize(self._zodbfile.name) - size
         report_stat("%0.1f ms (%d bytes)" % ((t*1000), size/i))
