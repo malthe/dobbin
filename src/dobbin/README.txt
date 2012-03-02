@@ -209,9 +209,16 @@ conflict resolution for instances of this class, we implement a
 ...         new_diff = new_state['count']- old_state['count']
 ...         return {'count': old_state['count'] + saved_diff + new_diff}
 
-As a doctest technicality, we set the class on the builtin module.
+As a doctest technicality, we set the class on the builtins-module
+(there's a difference here between Python 2.x and 3.x series, which
+explains the fallback import location).
 
->>> import __builtin__; __builtin__.Counter = Counter
+>>> try:
+...     import __builtin__ as builtins
+... except ImportError:
+...     import builtins
+
+>>> builtins.Counter = Counter
 
 Next we instantiate a counter instance, then add it to object graph.
 
@@ -271,10 +278,12 @@ and commit the transaction without adding it to the object graph, an
 exception is raised.
 
 >>> another = Persistent()
->>> transaction.commit()
-Traceback (most recent call last):
- ...
-ObjectGraphError: <dobbin.persistent.LocalPersistent object at ...> not connected to graph.
+>>> from dobbin.exc import ObjectGraphError
+>>> try:
+...     transaction.commit()
+... except ObjectGraphError as exc:
+...     print(str(exc))
+<dobbin.persistent.LocalPersistent object at ...> not connected to graph.
 
 We abort the transaction and try again, this time connecting the
 object using an attribute reference.
@@ -332,8 +341,8 @@ use only.
 
 >>> from tempfile import TemporaryFile
 >>> file = TemporaryFile()
->>> file.write('abc')
->>> file.seek(0)
+>>> length = file.write(b'abc')
+>>> pos = file.seek(0)
 
 Note that the file is read from the current position and until the end
 of the file.
@@ -372,8 +381,8 @@ We use the ``open`` method to open the stream; this is always
 required when using the stream as a file.
 
 >>> obj.file.open()
->>> obj.file.read()
-'abc'
+>>> print(obj.file.read().decode('ascii'))
+abc
 
 The ``seek`` and ``tell`` methods work as expected.
 
@@ -383,8 +392,8 @@ The ``seek`` and ``tell`` methods work as expected.
 We can seek to the beginning and repeat the exercise.
 
 >>> obj.file.seek(0)
->>> obj.file.read()
-'abc'
+>>> print(obj.file.read().decode('ascii'))
+abc
 
 As any file, we have to close it after use.
 
@@ -395,8 +404,8 @@ needn't bother opening or closing the file. This is automatically done
 for us. Note that this makes persistent streams suitable as return
 values for WSGI applications.
 
->>> "".join(obj.file)
-'abc'
+>>> print("".join(thunk.decode('ascii') for thunk in obj.file))
+abc
 
 Iteration is strictly independent from the other methods. We can
 observe that the file remains closed.
@@ -408,8 +417,8 @@ Start a new transaction (to prompt database catch-up) and confirm that
 file is available from second database.
 
 >>> tx = transaction.begin()
->>> "".join(new_obj.file)
-'abc'
+>>> print("".join(thunk.decode('ascii') for thunk in new_obj.file))
+abc
 
 Persistent dictionary
 ---------------------
@@ -495,12 +504,15 @@ True
 
 Binary streams are included in the snapshot, too.
 
->>> "".join(tmp_obj.file)
-'abc'
+>>> print("".join(thunk.decode('ascii') for thunk in tmp_obj.file))
+abc
 
 Cleanup
 -------
 
 >>> transaction.commit()
+>>> db.close()
+>>> new_db.close()
+>>> tmp_db.close()
 
 This concludes the narrative.

@@ -1,7 +1,7 @@
+import os
 import unittest
 import doctest
 import tempfile
-import transaction
 
 OPTIONFLAGS = (doctest.ELLIPSIS |
                doctest.NORMALIZE_WHITESPACE |
@@ -13,6 +13,7 @@ class DoctestCase(unittest.TestCase):
 
     @classmethod
     def test_readme(cls):
+        import transaction
         database_path = tempfile.NamedTemporaryFile().name
 
         globs = dict(
@@ -30,9 +31,12 @@ class DoctestCase(unittest.TestCase):
 
     @staticmethod
     def setUp(test):
+        import transaction
         transaction.abort()
 
     @staticmethod
     def tearDown(test):
+        import transaction
         tx = transaction.get()
         transaction.manager.free(tx)
+        os.unlink(test.globs['database_path'])

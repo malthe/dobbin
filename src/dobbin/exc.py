@@ -4,9 +4,11 @@ class ConflictError(Exception):
     def __init__(self, obj):
         self.object = obj
 
+
 class WriteConflictError(ConflictError):
     """Conflict that arises when a checked out object has been
     modified by another process."""
+
 
 class ReadConflictError(ConflictError):
     """Conflict that arises when a transaction can't be applied to one
@@ -19,6 +21,7 @@ class ReadConflictError(ConflictError):
         return '<%s objects="%d">' % (
             type(self).__name__, len(self.objects))
 
+
 class IntegrityError(Exception):
     """Integrity error."""
 
@@ -29,8 +32,10 @@ class IntegrityError(Exception):
         return '<%s %s>' % (
             type(self).__name__, repr(self.reason))
 
+
 class ObjectGraphError(Exception):
     """Object graph integrity error."""
+
 
 class InvalidObjectReference(Exception):
     """Object reference invalid for this database."""

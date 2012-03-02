@@ -158,8 +158,8 @@ class PersistentDictTestCase(BaseTestCase):
 
         # shared
         transaction.commit()
-        self.assertEqual(d.keys(), ['foo'])
-        self.assertEqual(d.items(), [('foo', 'bar')])
+        self.assertEqual(set(d.keys()), set(['foo']))
+        self.assertEqual(set(d.items()), set((('foo', 'bar'),)))
         self.assertEqual(tuple(d), ('foo',))
 
         # local

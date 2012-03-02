@@ -1,5 +1,6 @@
-import copy
 import os
+import sys
+import copy
 import threading
 import transaction
 import types
@@ -25,6 +26,7 @@ contains_item = dict.__contains__
 _co_lock = threading.RLock()
 _ci_lock = threading.Lock()
 
+
 def checkout(obj):
     """Checks out the object for this thread to make local changes."""
 
@@ -39,6 +41,7 @@ def checkout(obj):
             obj._p_jar.save(obj)
     finally:
         _co_lock.release()
+
 
 class Persistent(object):
     """Persistent base class.
@@ -118,6 +121,7 @@ class Persistent(object):
 
         return metacls("Local%s" % cls.__name__, (Local, cls), d)
 
+
 class PersistentDict(Persistent, dict):
     """Persistent dictionary.
 
@@ -139,7 +143,10 @@ class PersistentDict(Persistent, dict):
     def __getstate__(self):
         return self.__dict__, self
 
-    def __setstate__(self, (new_state, new_items)=({}, {})):
+    def __setstate__(self, updated=None):
+        if updated is None:
+            updated = {}, {}
+        new_state, new_items = updated
         self.__dict__.update(new_state)
         self.update(new_items)
 
@@ -165,7 +172,7 @@ class PersistentDict(Persistent, dict):
         add_class_properties(cls, LocalDict, d)
         return type("Local%s" % cls.__name__, (LocalDict, cls), d)
 
-class PersistentFile(threading.local):
+class PersistentFile(object):
     """Persistent file.
 
     Pass an open file to persist it in the database. The file you pass
@@ -180,6 +187,9 @@ class PersistentFile(threading.local):
     def __init__(self, stream):
         self.stream = stream
 
+    def close(self):
+        self.stream.close()
+
     @property
     def name(self):
         return self.stream.name
@@ -192,6 +202,7 @@ class PersistentFile(threading.local):
 
     def read(self, size=-1):
         return self.stream.read(size)
+
 
 class Local(Persistent):
     """Persistent object with thread-local state.
@@ -261,15 +272,20 @@ class Local(Persistent):
         self.__dict__.__init__()
         sync(self)
 
+
 class LocalDict(Local, PersistentDict):
     """Persistent dictionary with thread-local state."""
 
     def __getstate__(self):
         return self.__dict__.__getstate__(), self._p_items.__getstate__()
 
-    def __setstate__(self, (new_state, new_items)=({}, {})):
+    def __setstate__(self, updated=None):
+        if updated is None:
+            updated = {}, {}
+        new_state, new_items = updated
         self.__dict__.__setstate__(new_state)
         self._p_items.__setstate__(new_items)
+
 
 class Broken(Persistent):
     """Broken object.
@@ -294,6 +310,7 @@ class Broken(Persistent):
     def __init__(self, oid, cls):
         setattr(self, '_p_oid', oid)
 
+
 class WorkingCopyDict(threading.local):
     """Working-copy instance dictionary which provides data
     consistency through the course of a transaction."""
@@ -308,7 +325,7 @@ class WorkingCopyDict(threading.local):
             if change.pop(EMPTY, False):
                 local.clear()
 
-            exclude = local.keys()
+            exclude = set(local.keys())
             for key in change:
                 if key not in exclude:
                     value = change[key]
@@ -360,7 +377,7 @@ class WorkingCopyDict(threading.local):
 
         shared = self._p_dict
         if not contains_item(local, EMPTY):
-            value = getitem(self._p_dict, key)
+            value = getitem(shared, key)
             new_value = copy.deepcopy(value)
             if value is not new_value:
                 local[key] = new_value
@@ -520,6 +537,7 @@ class WorkingCopyDict(threading.local):
     def values(self):
         return [self[key] for key in self]
 
+
 class Synchronizer(threading.local):
     """Object synchronizer.
 
@@ -546,7 +564,10 @@ class Synchronizer(threading.local):
     visited last in each transaction phase.
     """
 
-    __slots__ = "_connected", "_tx_start", "__weakref__"
+    __slots__ = "_connected",
+
+    if sys.version_info[:3] < (2, 7, 0):
+        __slots__ += ("__weakref__", )
 
     timestamp = None
     _tx_start = weakref.WeakKeyDictionary()
@@ -575,14 +596,13 @@ class Synchronizer(threading.local):
         pass
 
     def afterCompletion(self, tx):
-        timestamp = self.timestamp
         connected = self._connected
 
         self._tx_lock.acquire()
         try:
             # compute earliest and latest transaction timestamp
-            timestamps = filter(None, self._tx_start.values())
-            earliest = timestamps and min(timestamps) or None
+            timestamps = tuple(filter(None, self._tx_start.values()))
+            earliest = min(timestamps) if timestamps else None
 
             reconnect = set()
             while connected:
@@ -591,7 +611,7 @@ class Synchronizer(threading.local):
                 # check if the earliest transaction began after the last
                 # change was committed to the object
                 last = obj._p_serial
-                if earliest is None or earliest >= last:
+                if earliest is None or last is not None and earliest >= last:
                     obj._p_checkin()
                 else:
                     reconnect.add(obj)
@@ -624,7 +644,7 @@ class Synchronizer(threading.local):
         pass
 
     def sortKey(self):
-        return (object,)
+        return (id(object),)
 
     def tpc_begin(self, tx):
         pass
@@ -647,4 +667,3 @@ class Synchronizer(threading.local):
         pass
 
 sync = Synchronizer()
-

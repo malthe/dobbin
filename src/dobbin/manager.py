@@ -14,6 +14,7 @@ ROOT_OID = 0
 
 setattr = object.__setattr__
 
+
 class Manager(object):
     """Transactional object manager.
 
@@ -116,7 +117,7 @@ class Manager(object):
 
                 # if the object has been updated since we begun our
                 # transaction, it's a write-conflict.
-                if obj._p_serial > timestamp:
+                if obj._p_serial is not None and obj._p_serial > timestamp:
                     try:
                         state = self._resolve(obj)
                     except ConflictError:
@@ -280,7 +281,10 @@ class Manager(object):
             if new_state is None:
                 new_state = obj.__getstate__()
             return obj._p_resolve_conflict(
-                obj.__oldstate__(), super(type(obj), obj).__getstate__(), new_state)
+                obj.__oldstate__(),
+                super(type(obj), obj).__getstate__(),
+                new_state
+                )
         finally:
             self.lock_release()
 
@@ -300,6 +304,7 @@ class Manager(object):
 
         self._thread.needs_to_join = True
         self.tx_count += 1
+
 
 class ThreadState(threading.local):
     """Thread-local database state."""
