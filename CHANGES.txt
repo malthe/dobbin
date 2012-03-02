@@ -5,6 +5,9 @@ In next release ...
 
 Bugfixes:
 
+- Persistent subclasses now correctly call ``__init__`` on
+  construction.
+
 - Add support for ``__slots__``.
 
 0.3 (2012-02-02)

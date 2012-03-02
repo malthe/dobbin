@@ -60,18 +60,24 @@ class Persistent(object):
     _p_resolve_conflict = None
 
     def __new__(cls, *args, **kwargs):
-        for base in cls.__mro__:
-            if base.__new__ is cls.__new__:
-                continue
-            try:
-                inst = base.__new__(cls)
-            except TypeError:
-                continue
-            break
+        bases = cls.__mro__
+        try:
+            index = bases.index(Local)
+        except ValueError:
+            for base in bases:
+                if base.__new__ is cls.__new__:
+                    continue
+                factory = base.__new__
+                break
+            else:
+                factory = object.__new__
         else:
-            raise TypeError("Can't create object of type %s." % repr(cls))
+            cls = bases[index + 1]
+            factory = object.__new__
 
+        inst = factory(cls)
         checkout(inst)
+        inst.__init__(*args, **kwargs)
         return inst
 
     def __deepcopy__(self, memo):
