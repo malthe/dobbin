@@ -31,7 +31,7 @@ def add_class_properties(cls, local_cls, d):
         attrs.update(base.__dict__)
 
     for key, value in attrs.items():
-        if key == '__qualname__':
+        if key == '__qualname__' or key == '__slots__':
             continue
 
         if (key, value) in flattened:

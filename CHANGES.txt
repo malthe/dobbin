@@ -1,6 +1,12 @@
 Changes
 =======
 
+In next release ...
+
+Bugfixes:
+
+- Add support for ``__slots__``.
+
 0.3 (2012-02-02)
 ----------------
 
