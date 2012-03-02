@@ -14,3 +14,4 @@ class BaseTestCase(unittest.TestCase):
         self._tempfile.close()
         tx = transaction.get()
         transaction.manager.free(tx)
+        self.database.close()
