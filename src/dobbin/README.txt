@@ -2,7 +2,8 @@ User's guide
 ============
 
 This is the primary documentation for the database. It uses an
-interactive narrative which doubles as a doctest.
+interactive narrative which doubles as a doctest. There's a suite of
+regression tests included in the distribution.
 
 You can run the tests by issuing the following command at the
 command-line prompt::
@@ -12,8 +13,9 @@ $ python setup.py test
 Setup
 -----
 
-The database stores transactions in a single file. It's optimized for
-long-running processes, e.g. application servers.
+The default storage option writes transactions sequentially in a
+single file. It's optimized for long-running processes,
+e.g. application servers.
 
 The first step is to initialize a database object. To configure it we
 provide a path on the file system. The path needn't exist already.

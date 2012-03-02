@@ -21,7 +21,7 @@ setup(
     name="dobbin",
     version=__version__,
     description="Transactional object database, implemented in pure Python.",
-    long_description="\n\n".join((README, USAGE, NOTES, CHANGES)),
+    long_description="\n\n".join((README, NOTES, USAGE, CHANGES)),
     classifiers=[
        "Development Status :: 3 - Alpha",
        "Intended Audience :: Developers",

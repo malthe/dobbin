@@ -1,79 +1,75 @@
 Notes
 =====
 
-Most users of the database will want to get acquainted with the
-information in this section, especially before deployment.
+Frequently asked questions
+--------------------------
 
-Configuration
--------------
+This section lists frequently asked questions.
 
-The included database implementation writes transactions to a single
-file. Multiple processes may connect to the same file and share the
-same database. No further configuration is required; the database uses
-native file-locking to ensure exclusive write-access.
+#) How is Dobbin different from ZODB?
 
-.. warning:: To avoid memory thrashing, limit the physical memory allowance of your Python processes and make sure there is enough virtual memory available (at least the size of your database) [#]_.
+   There are other object databases available for Python, most notably
+   `ZODB <http://www.zodb.org/>`_ from Zope Corporation.
 
-You may want to compile Python with the ``--without-pymalloc`` flag to
-use native memory allocation. This may improve performance in
-applications that connect to large databases due to better paging.
+   Key differences:
+
+   - Dobbin is written 100% in Python. The persistence layer in ZODB
+     is written in C. ZODB also comes with support for B-Trees; this
+     is also written in C.
+
+   - Dobbin is available on Python 3 (but requires a POSIX-system).
+
+   - ZODB comes with support for B-Trees which allows processes to
+     load objects on demand (because of the implicit weak
+     reference). Dobbin currently loads all data at once and keeps it
+     in memory.
+
+   - Dobbin uses a persistence model that tries to share data in
+     active objects between threads, but relies on an explicit
+     operation to put an object in a mode that allows making changes
+     to it. ZODB shares only inactive object data.
+
+   - ZODB comes with ZEO, an enterprise-level network database layer
+     which allows processes on different machines to connect to the
+     same database.
+
+   - ZODB comes with a memory management system that evicts object
+     data from memory based on usage. Dobbin does not attempt to
+     manage memory consumption, but calls upon the virtual memory
+     manager to swap inactive object data to disk.
+
+#) What is the database file format?
+
+   The default storage option writes transactions sequentially to a
+   single file.
+
+   Each transaction consists of a number of records which consist of a
+   Python pickle and sometimes an attached payload of data (in which
+   case the pickle contains control information). Finally, the
+   transaction ends with a transaction record object, also a Python
+   pickle.
+
+#) Can I connect to a single database with multiple processes?
+
+   Yes.
+
+   The default storage option writes transactions to a single file,
+   which alone makes up the storage record. Multiple processes can
+   connect to the same file and share the same database,
+   concurrently. No further configuration is required; the database
+   uses POSIX file-locking to ensure exclusive write-access and
+   processes automatically stay synchronized.
+
+#) How can I limit memory consumption?
+
+   To avoid memory thrashing, limit the physical memory allowance of
+   your Python processes and make sure there is enough virtual memory
+   available (at least the size of your database) [#]_.
+
+   You may want to compile Python with the ``--without-pymalloc`` flag to
+   use native memory allocation. This may improve performance in
+   applications that connect to large databases due to better paging.
 
 .. [#] On UNIX the ``ulimit`` command can be used limit physical memory
  usage; this prevents thrashing when working with large databases.
 
-Motivation
-----------
-
-There are other object databases available for Python, most
-importantly the ZODB from Zope Corporation (available under the
-BSD-like ZPL license).
-
-Notable differences:
-
-- Dobbin is pure Python
-- 1/20 the codebase
-- Less overhead
-
-The assumptions that Dobbin makes lead to a simple design; the case of
-the ZODB is the exact opposite. Which is more reasonable comes down to
-these assumptions.
-
-Architecture
-------------
-
-Dobbin is designed to support multi-threaded applications without
-significant memory overhead. It does this by keeping objects in a
-shared (between all threads) state when possible, and only as little
-thread-local state as is required by the concurrency model.
-
-It does not, however, manage memory consumption in terms of data on
-disk versus data in RAM. On startup, the entire database is loaded
-into virtual memory and to this extent some data may be loaded
-directly into the system page file. The operating system's memory
-manager is expected to keep much-used objects readily available and
-lesser-used objects available on request.
-
-One assumption that lead to this decision is that the virtual memory
-manager is able to write CPython-objects to disk while a Python-based
-memory manager will need to serialize objects first. It is difficult
-to implement a memory manager in Python and the complexity is certain
-to cause a logic overhead which will hurt performance.
-
-MVCC
-----
-
-Dobbin provides a MVCC concurrency model.
-
-A transaction (tx1) begins; an object is checked out. Meanwhile a
-second transaction (tx2) begins.
-
-When tx1 is committed, the shared state of the object is updated, too,
-although first tx2 gets assigned local changes to the object in which
-said changes are reversed.
-
-Such "reversing" changesets are applied for all active threads (which
-have an active transaction that predates the commit).
-
-If a third transaction is begun (again in a separate thread), it
-simply uses the shared state of the object (having no local state of
-its own).
