@@ -1,4 +1,4 @@
-__version__ = '0.2'
+__version__ = '0.3'
 
 import os
 import sys
@@ -20,12 +20,19 @@ install_requires = [
 setup(
     name="dobbin",
     version=__version__,
-    description="Pure-Python object database.",
+    description="Transactional object database, implemented in pure Python.",
     long_description="\n\n".join((README, USAGE, NOTES, CHANGES)),
     classifiers=[
        "Development Status :: 3 - Alpha",
        "Intended Audience :: Developers",
        "Programming Language :: Python",
+       "Programming Language :: Python :: 2",
+       "Programming Language :: Python :: 3",
+       "Programming Language :: Python :: 2.6",
+       "Programming Language :: Python :: 2.7",
+       "Programming Language :: Python :: 3.1",
+       "Programming Language :: Python :: 3.2",
+       "Programming Language :: Python :: 3.3",
        "Topic :: Database",
        "Operating System :: POSIX",
       ],
