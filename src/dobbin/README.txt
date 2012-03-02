@@ -368,6 +368,8 @@ We must manually close the file we provided to the persistent wrapper
 (or let it fall out of scope).
 
 >>> file.close()
+>>> pfile.closed
+True
 
 Using persistent streams
 ------------------------

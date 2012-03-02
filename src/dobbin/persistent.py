@@ -172,6 +172,7 @@ class PersistentDict(Persistent, dict):
         add_class_properties(cls, LocalDict, d)
         return type("Local%s" % cls.__name__, (LocalDict, cls), d)
 
+
 class PersistentFile(object):
     """Persistent file.
 
@@ -189,6 +190,10 @@ class PersistentFile(object):
 
     def close(self):
         self.stream.close()
+
+    @property
+    def closed(self):
+        self.stream.closed
 
     @property
     def name(self):
