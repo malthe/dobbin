@@ -32,6 +32,7 @@ on disk.
   the object graph to the database handle::
 
     from dobbin.database import Database
+    import transaction
 
     jar = Database('data.fs')
     jar.elect(foo)
